@@ -1,0 +1,242 @@
+package checker
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Status string
+
+const (
+	StatusUp      Status = "up"
+	StatusDown    Status = "down"
+	StatusDegraded Status = "degraded"
+	StatusUnknown Status = "unknown"
+)
+
+type ServiceState struct {
+	Name              string    `json:"name"`
+	Type              string    `json:"type"`
+	Status            Status    `json:"status"`
+	ResponseMs        int64     `json:"response_ms"`
+	LastCheck         time.Time `json:"last_check"`
+	ConsecutiveFails  int       `json:"consecutive_failures"`
+	UptimePct24h      float64   `json:"uptime_pct_24h"`
+	Version           string    `json:"version,omitempty"`
+	VersionDrift      int       `json:"version_drift,omitempty"`
+	LastError         string    `json:"last_error,omitempty"`
+}
+
+type uptimeRecord struct {
+	timestamp time.Time
+	up        bool
+}
+
+type Checker struct {
+	config   *Config
+	mu       sync.RWMutex
+	states   map[string]*ServiceState
+	history  map[string][]uptimeRecord
+	onChange func(name string, oldStatus, newStatus Status)
+	onRestart func(name string, success bool, err error)
+}
+
+func New(cfg *Config) *Checker {
+	c := &Checker{
+		config:  cfg,
+		states:  make(map[string]*ServiceState),
+		history: make(map[string][]uptimeRecord),
+	}
+	for _, svc := range cfg.Services {
+		c.states[svc.Name] = &ServiceState{
+			Name:   svc.Name,
+			Type:   svc.Type,
+			Status: StatusUnknown,
+		}
+	}
+	return c
+}
+
+func (c *Checker) OnChange(fn func(name string, oldStatus, newStatus Status)) {
+	c.onChange = fn
+}
+
+func (c *Checker) OnRestart(fn func(name string, success bool, err error)) {
+	c.onRestart = fn
+}
+
+func (c *Checker) GetStates() []ServiceState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	result := make([]ServiceState, 0, len(c.states))
+	for _, s := range c.states {
+		result = append(result, *s)
+	}
+	return result
+}
+
+func (c *Checker) Run(ctx context.Context) {
+	// Initial check
+	c.checkAll()
+
+	ticker := time.NewTicker(c.config.CheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.checkAll()
+		}
+	}
+}
+
+func (c *Checker) checkAll() {
+	var wg sync.WaitGroup
+	for _, svc := range c.config.Services {
+		wg.Add(1)
+		go func(svc ServiceConfig) {
+			defer wg.Done()
+			c.checkService(svc)
+		}(svc)
+	}
+	wg.Wait()
+}
+
+func (c *Checker) checkService(svc ServiceConfig) {
+	start := time.Now()
+	var checkErr error
+
+	switch svc.Type {
+	case "http":
+		checkErr = c.checkHTTP(svc)
+	case "systemd":
+		checkErr = c.checkSystemd(svc)
+	case "command":
+		checkErr = c.checkCommand(svc)
+	default:
+		checkErr = fmt.Errorf("unknown check type: %s", svc.Type)
+	}
+
+	elapsed := time.Since(start)
+
+	c.mu.Lock()
+	state := c.states[svc.Name]
+	oldStatus := state.Status
+
+	state.LastCheck = time.Now()
+	state.ResponseMs = elapsed.Milliseconds()
+
+	if checkErr != nil {
+		state.ConsecutiveFails++
+		state.LastError = checkErr.Error()
+		if state.ConsecutiveFails >= c.config.AlertThreshold {
+			state.Status = StatusDown
+		} else {
+			state.Status = StatusDegraded
+		}
+	} else {
+		state.ConsecutiveFails = 0
+		state.Status = StatusUp
+		state.LastError = ""
+	}
+
+	// Record uptime history
+	c.history[svc.Name] = append(c.history[svc.Name], uptimeRecord{
+		timestamp: time.Now(),
+		up:        checkErr == nil,
+	})
+	state.UptimePct24h = c.calcUptime24h(svc.Name)
+
+	newStatus := state.Status
+	c.mu.Unlock()
+
+	if oldStatus != newStatus && oldStatus != StatusUnknown && c.onChange != nil {
+		c.onChange(svc.Name, oldStatus, newStatus)
+	}
+
+	// Auto-restart on failure
+	if checkErr != nil && svc.AutoRestart && svc.Type == "systemd" && state.ConsecutiveFails >= c.config.AlertThreshold {
+		go c.restartService(svc)
+	}
+}
+
+func (c *Checker) checkHTTP(svc ServiceConfig) error {
+	timeout := svc.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(svc.URL)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Checker) checkSystemd(svc ServiceConfig) error {
+	cmd := exec.Command("systemctl", "--user", "is-active", svc.Unit)
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("unit %s: %s", svc.Unit, strings.TrimSpace(string(out)))
+	}
+	status := strings.TrimSpace(string(out))
+	if status != "active" {
+		return fmt.Errorf("unit %s is %s", svc.Unit, status)
+	}
+	return nil
+}
+
+func (c *Checker) checkCommand(svc ServiceConfig) error {
+	if len(svc.Command) == 0 {
+		return fmt.Errorf("no command specified")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, svc.Command[0], svc.Command[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("command failed: %v: %s", err, string(out))
+	}
+	if svc.ExpectOutput != "" && !strings.Contains(strings.ToLower(string(out)), strings.ToLower(svc.ExpectOutput)) {
+		return fmt.Errorf("expected output containing %q, got: %s", svc.ExpectOutput, string(out))
+	}
+	return nil
+}
+
+func (c *Checker) restartService(svc ServiceConfig) {
+	cmd := exec.Command("systemctl", "--user", "restart", svc.Unit)
+	err := cmd.Run()
+	success := err == nil
+	if c.onRestart != nil {
+		c.onRestart(svc.Name, success, err)
+	}
+}
+
+func (c *Checker) calcUptime24h(name string) float64 {
+	records := c.history[name]
+	cutoff := time.Now().Add(-24 * time.Hour)
+	total := 0
+	up := 0
+	for _, r := range records {
+		if r.timestamp.After(cutoff) {
+			total++
+			if r.up {
+				up++
+			}
+		}
+	}
+	if total == 0 {
+		return 100.0
+	}
+	return float64(up) / float64(total) * 100.0
+}

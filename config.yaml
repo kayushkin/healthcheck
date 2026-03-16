@@ -1,0 +1,77 @@
+check_interval: 60s
+alert_threshold: 3
+listen_addr: ":8099"
+log_file: "/tmp/healthcheck-alerts.log"
+bus_url: "http://localhost:8100"
+
+services:
+  - name: kayushkin.com
+    type: http
+    url: "https://kayushkin.com"
+    timeout: 10s
+
+  - name: mangastack
+    type: http
+    url: "http://kayushkin.com:8084"
+    timeout: 10s
+
+  - name: inber-server-http
+    type: http
+    url: "http://localhost:8200"
+    timeout: 5s
+
+  - name: model-store
+    type: http
+    url: "http://localhost:8150"
+    timeout: 5s
+
+  - name: bus
+    type: http
+    url: "http://localhost:8100"
+    timeout: 5s
+
+  - name: logstack
+    type: http
+    url: "http://localhost:8088"
+    timeout: 5s
+
+  - name: openclaw-gateway
+    type: command
+    command: ["openclaw", "gateway", "status"]
+    expect_output: "running"
+
+  - name: openclaw-bus
+    type: systemd
+    unit: openclaw-bus
+    auto_restart: true
+
+  - name: inber-server
+    type: systemd
+    unit: inber-server
+    auto_restart: true
+
+  - name: ssh-tunnels
+    type: systemd
+    unit: ssh-tunnels
+    auto_restart: false
+
+version_checks:
+  - name: kayushkin.com
+    local_repo: "~/life/repos/kayushkin.com"
+    remote_ref: "origin/main"
+    max_drift: 5
+
+  - name: inber
+    local_repo: "~/life/repos/inber"
+    remote_ref: "origin/main"
+    max_drift: 5
+
+  - name: model-store
+    local_repo: "~/life/repos/model-store"
+    remote_ref: "origin/main"
+    max_drift: 5
+
+  - name: openclaw-bus
+    local_repo: "~/life/repos/openclaw-bus"
+    remote_ref: "origin/main"
+    max_drift: 5
