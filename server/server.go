@@ -15,9 +15,10 @@ type Server struct {
 }
 
 type StatusResponse struct {
-	Timestamp string                 `json:"timestamp"`
-	Services  []checker.ServiceState `json:"services"`
-	Versions  []checker.VersionState `json:"versions"`
+	Timestamp string                   `json:"timestamp"`
+	Services  []checker.ServiceState   `json:"services"`
+	Resources []checker.ResourceState  `json:"resources"`
+	Versions  []checker.VersionState   `json:"versions"`
 }
 
 func New(c *checker.Checker, addr string) *Server {
@@ -40,6 +41,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := StatusResponse{
 		Timestamp: time.Now().Format(time.RFC3339),
 		Services:  s.checker.GetStates(),
+		Resources: s.checker.GetResourceStates(),
 		Versions:  s.checker.CheckVersions(),
 	}
 

@@ -38,25 +38,35 @@ type uptimeRecord struct {
 }
 
 type Checker struct {
-	config   *Config
-	mu       sync.RWMutex
-	states   map[string]*ServiceState
-	history  map[string][]uptimeRecord
-	onChange func(name string, oldStatus, newStatus Status)
-	onRestart func(name string, success bool, err error)
+	config         *Config
+	mu             sync.RWMutex
+	states         map[string]*ServiceState
+	resourceStates map[string]*ResourceState
+	history        map[string][]uptimeRecord
+	onChange       func(name string, oldStatus, newStatus Status)
+	onRestart      func(name string, success bool, err error)
 }
 
 func New(cfg *Config) *Checker {
 	c := &Checker{
-		config:  cfg,
-		states:  make(map[string]*ServiceState),
-		history: make(map[string][]uptimeRecord),
+		config:         cfg,
+		states:         make(map[string]*ServiceState),
+		resourceStates: make(map[string]*ResourceState),
+		history:        make(map[string][]uptimeRecord),
 	}
 	for _, svc := range cfg.Services {
 		c.states[svc.Name] = &ServiceState{
 			Name:   svc.Name,
 			Type:   svc.Type,
 			Status: StatusUnknown,
+		}
+	}
+	for _, res := range cfg.Resources {
+		c.resourceStates[res.Name] = &ResourceState{
+			Name:      res.Name,
+			Type:      res.Type,
+			Threshold: res.Threshold,
+			Status:    StatusUnknown,
 		}
 	}
 	return c
@@ -83,6 +93,7 @@ func (c *Checker) GetStates() []ServiceState {
 func (c *Checker) Run(ctx context.Context) {
 	// Initial check
 	c.checkAll()
+	c.checkAllResources()
 
 	ticker := time.NewTicker(c.config.CheckInterval)
 	defer ticker.Stop()
@@ -92,6 +103,7 @@ func (c *Checker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.checkAll()
+			c.checkAllResources()
 		}
 	}
 }

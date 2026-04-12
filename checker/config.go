@@ -8,13 +8,17 @@ import (
 )
 
 type Config struct {
-	CheckInterval  time.Duration   `yaml:"check_interval"`
-	AlertThreshold int             `yaml:"alert_threshold"`
-	ListenAddr     string          `yaml:"listen_addr"`
-	LogFile        string          `yaml:"log_file"`
-	BusURL         string          `yaml:"bus_url"`
-	Services       []ServiceConfig `yaml:"services"`
-	VersionChecks  []VersionConfig `yaml:"version_checks"`
+	CheckInterval  time.Duration    `yaml:"check_interval"`
+	AlertThreshold int              `yaml:"alert_threshold"`
+	ListenAddr     string           `yaml:"listen_addr"`
+	LogFile        string           `yaml:"log_file"`
+	BusURL         string           `yaml:"bus_url"`
+	ClaudePath     string           `yaml:"claude_path"`
+	ClaudeWorkdir  string           `yaml:"claude_workdir"`
+	NatsURL        string           `yaml:"nats_url"`
+	Services       []ServiceConfig  `yaml:"services"`
+	Resources      []ResourceConfig `yaml:"resources"`
+	VersionChecks  []VersionConfig  `yaml:"version_checks"`
 }
 
 type ServiceConfig struct {
@@ -26,6 +30,14 @@ type ServiceConfig struct {
 	Command      []string      `yaml:"command,omitempty"`
 	ExpectOutput string        `yaml:"expect_output,omitempty"`
 	AutoRestart  bool          `yaml:"auto_restart,omitempty"`
+}
+
+type ResourceConfig struct {
+	Name      string  `yaml:"name"`
+	Type      string  `yaml:"type"` // disk, memory
+	Path      string  `yaml:"path,omitempty"`
+	Threshold float64 `yaml:"threshold"` // percent usage to alert at
+	CCAgent   bool    `yaml:"cc_agent"`  // spawn CC agent on alert
 }
 
 type VersionConfig struct {

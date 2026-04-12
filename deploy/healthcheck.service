@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/life/repos/healthcheck/healthcheck -config %h/life/repos/healthcheck/config.yaml
+ExecStart=%h/repos/healthcheck/healthcheck -config %h/repos/healthcheck/config.yaml
 Restart=on-failure
 RestartSec=10
 Environment=HOME=%h
