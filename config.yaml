@@ -84,3 +84,13 @@ services:
     type: systemd
     unit: si
     auto_restart: true
+
+  - name: llmux
+    type: systemd
+    unit: llmux
+    auto_restart: true
+
+  - name: log-store
+    type: systemd
+    unit: log-store
+    auto_restart: true
