@@ -3,7 +3,7 @@ alert_threshold: 3
 listen_addr: ":8099"
 log_file: "/tmp/healthcheck-alerts.log"
 nats_url: "nats://localhost:4222"
-claude_path: "/home/kayushkincom/.local/bin/claude"
+claude_path: "/home/kayushkincom/.local/share/mise/shims/claude"
 claude_workdir: "/home/kayushkincom"
 
 resources:
