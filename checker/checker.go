@@ -38,13 +38,15 @@ type uptimeRecord struct {
 }
 
 type Checker struct {
-	config         *Config
-	mu             sync.RWMutex
-	states         map[string]*ServiceState
-	resourceStates map[string]*ResourceState
-	history        map[string][]uptimeRecord
-	onChange       func(name string, oldStatus, newStatus Status)
-	onRestart      func(name string, success bool, err error)
+	config             *Config
+	mu                 sync.RWMutex
+	states             map[string]*ServiceState
+	resourceStates     map[string]*ResourceState
+	history            map[string][]uptimeRecord
+	onChange           func(name string, oldStatus, newStatus Status)
+	onRestart          func(name string, success bool, err error)
+	onPersistentAlert  func(name string, state ResourceState)
+	onCCAgentExhausted func(name string, state ResourceState)
 }
 
 func New(cfg *Config) *Checker {
@@ -78,6 +80,14 @@ func (c *Checker) OnChange(fn func(name string, oldStatus, newStatus Status)) {
 
 func (c *Checker) OnRestart(fn func(name string, success bool, err error)) {
 	c.onRestart = fn
+}
+
+func (c *Checker) OnPersistentAlert(fn func(name string, state ResourceState)) {
+	c.onPersistentAlert = fn
+}
+
+func (c *Checker) OnCCAgentExhausted(fn func(name string, state ResourceState)) {
+	c.onCCAgentExhausted = fn
 }
 
 func (c *Checker) GetStates() []ServiceState {
@@ -196,7 +206,8 @@ func (c *Checker) checkHTTP(svc ServiceConfig) error {
 }
 
 func (c *Checker) checkSystemd(svc ServiceConfig) error {
-	cmd := exec.Command("systemctl", "--user", "is-active", svc.Unit)
+	args := systemctlArgs(svc, "is-active", svc.Unit)
+	cmd := exec.Command("systemctl", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("unit %s: %s", svc.Unit, strings.TrimSpace(string(out)))
@@ -206,6 +217,13 @@ func (c *Checker) checkSystemd(svc ServiceConfig) error {
 		return fmt.Errorf("unit %s is %s", svc.Unit, status)
 	}
 	return nil
+}
+
+func systemctlArgs(svc ServiceConfig, verb, unit string) []string {
+	if svc.SystemUnit {
+		return []string{verb, unit}
+	}
+	return []string{"--user", verb, unit}
 }
 
 func (c *Checker) checkCommand(svc ServiceConfig) error {
@@ -226,7 +244,8 @@ func (c *Checker) checkCommand(svc ServiceConfig) error {
 }
 
 func (c *Checker) restartService(svc ServiceConfig) {
-	cmd := exec.Command("systemctl", "--user", "restart", svc.Unit)
+	args := systemctlArgs(svc, "restart", svc.Unit)
+	cmd := exec.Command("systemctl", args...)
 	err := cmd.Run()
 	success := err == nil
 	if c.onRestart != nil {

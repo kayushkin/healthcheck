@@ -16,6 +16,7 @@ type Config struct {
 	ClaudePath     string           `yaml:"claude_path"`
 	ClaudeWorkdir  string           `yaml:"claude_workdir"`
 	NatsURL        string           `yaml:"nats_url"`
+	LLMBridgeURL   string           `yaml:"llm_bridge_url"`
 	Services       []ServiceConfig  `yaml:"services"`
 	Resources      []ResourceConfig `yaml:"resources"`
 	VersionChecks  []VersionConfig  `yaml:"version_checks"`
@@ -27,6 +28,7 @@ type ServiceConfig struct {
 	URL          string        `yaml:"url,omitempty"`
 	Timeout      time.Duration `yaml:"timeout,omitempty"`
 	Unit         string        `yaml:"unit,omitempty"`
+	SystemUnit   bool          `yaml:"system_unit,omitempty"` // systemctl runs without --user when true
 	Command      []string      `yaml:"command,omitempty"`
 	ExpectOutput string        `yaml:"expect_output,omitempty"`
 	AutoRestart  bool          `yaml:"auto_restart,omitempty"`

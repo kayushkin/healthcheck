@@ -3,6 +3,7 @@ alert_threshold: 3
 listen_addr: ":8099"
 log_file: "/tmp/healthcheck-alerts.log"
 nats_url: "nats://localhost:4222"
+llm_bridge_url: "http://localhost:8160"
 claude_path: "/home/kayushkincom/.local/share/mise/shims/claude"
 claude_workdir: "/home/kayushkincom"
 
@@ -93,4 +94,88 @@ services:
   - name: log-store
     type: systemd
     unit: log-store
+    auto_restart: true
+
+  # Core agent / tools (user units)
+  - name: noteboard
+    type: systemd
+    unit: noteboard
+    auto_restart: true
+
+  - name: forge-api
+    type: systemd
+    unit: forge-api
+    auto_restart: true
+
+  - name: apiauth
+    type: systemd
+    unit: apiauth
+    auto_restart: true
+
+  - name: openclaw-gateway
+    type: systemd
+    unit: openclaw-gateway
+    auto_restart: true
+
+  - name: usage-store
+    type: systemd
+    unit: usage-store
+    auto_restart: true
+
+  - name: bus
+    type: systemd
+    unit: bus
+    auto_restart: true
+
+  - name: tunnel-server
+    type: systemd
+    unit: tunnel-server
+    auto_restart: true
+
+  # Services without systemd units — checked by HTTP health endpoint
+  - name: marginalia
+    type: http
+    url: http://localhost:8192/health
+
+  # System (non-user) units
+  - name: llm-bridge
+    type: systemd
+    unit: llm-bridge
+    system_unit: true
+    auto_restart: true
+
+  - name: bookstack
+    type: systemd
+    unit: bookstack
+    system_unit: true
+    auto_restart: true
+
+  - name: downloadstack
+    type: systemd
+    unit: downloadstack
+    system_unit: true
+    auto_restart: true
+
+  - name: videostack
+    type: systemd
+    unit: videostack
+    system_unit: true
+    auto_restart: true
+
+  - name: argraphments
+    type: systemd
+    unit: argraphments
+    system_unit: true
+    auto_restart: true
+
+  - name: mangastack
+    type: systemd
+    unit: mangastack
+    system_unit: true
+    auto_restart: true
+
+  - name: podcaststack
+    type: systemd
+    unit: podcaststack
+    system_unit: true
     auto_restart: true
