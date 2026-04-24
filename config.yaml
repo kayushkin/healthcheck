@@ -66,6 +66,11 @@ services:
     unit: agent-store
     auto_restart: true
 
+  - name: skill-store
+    type: systemd
+    unit: skill-store
+    auto_restart: true
+
   - name: openclaw-adapter
     type: systemd
     unit: openclaw-adapter
@@ -91,6 +96,11 @@ services:
     unit: llmux
     auto_restart: true
 
+  - name: llm-bridge-adapter
+    type: systemd
+    unit: llm-bridge-adapter
+    auto_restart: true
+
   - name: log-store
     type: systemd
     unit: log-store
@@ -112,10 +122,15 @@ services:
     unit: apiauth
     auto_restart: true
 
+  - name: mailstack
+    type: systemd
+    unit: mailstack
+    auto_restart: true
+
   - name: openclaw-gateway
     type: systemd
     unit: openclaw-gateway
-    auto_restart: true
+    auto_restart: false
 
   - name: usage-store
     type: systemd
