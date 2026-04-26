@@ -1,9 +1,13 @@
 package checker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -21,7 +25,17 @@ type ResourceState struct {
 	LastCheck        time.Time `json:"last_check"`
 	ConsecutiveFails int       `json:"consecutive_failures"`
 	LastError        string    `json:"last_error,omitempty"`
+	LastAlertAt      time.Time `json:"last_alert_at,omitempty"`
+	LastCCAgentAt    time.Time `json:"last_cc_agent_at,omitempty"`
+	CCAgentAttempts  int       `json:"cc_agent_attempts,omitempty"`
+	CCAgentGaveUp    bool      `json:"cc_agent_gave_up,omitempty"`
 }
+
+const (
+	ccAgentCooldown         = 30 * time.Minute
+	persistentAlertInterval = 15 * time.Minute
+	maxCCAgentAttempts      = 3
+)
 
 func (c *Checker) GetResourceStates() []ResourceState {
 	c.mu.RLock()
@@ -87,16 +101,84 @@ func (c *Checker) checkResource(res ResourceConfig) {
 	}
 
 	newStatus := state.Status
+	now := time.Now()
+
+	firePersistent := false
+	spawnAgent := false
+	fireGaveUp := false
+	if newStatus == StatusDown {
+		if !state.LastAlertAt.IsZero() && now.Sub(state.LastAlertAt) >= persistentAlertInterval {
+			state.LastAlertAt = now
+			firePersistent = true
+		} else if state.LastAlertAt.IsZero() {
+			state.LastAlertAt = now
+		}
+		if res.CCAgent && (state.LastCCAgentAt.IsZero() || now.Sub(state.LastCCAgentAt) >= ccAgentCooldown) {
+			if state.CCAgentAttempts < maxCCAgentAttempts {
+				state.LastCCAgentAt = now
+				state.CCAgentAttempts++
+				spawnAgent = true
+			} else if !state.CCAgentGaveUp {
+				state.CCAgentGaveUp = true
+				fireGaveUp = true
+			}
+		}
+	} else {
+		state.LastAlertAt = time.Time{}
+		state.LastCCAgentAt = time.Time{}
+		state.CCAgentAttempts = 0
+		state.CCAgentGaveUp = false
+	}
+	stateCopy := *state
 	c.mu.Unlock()
 
-	if oldStatus != newStatus && oldStatus != StatusUnknown && c.onChange != nil {
+	if oldStatus != newStatus && newStatus != StatusUnknown && c.onChange != nil {
 		c.onChange(res.Name, oldStatus, newStatus)
 	}
 
-	// Spawn CC agent on resource alert
-	if res.CCAgent && state.Status == StatusDown && state.ConsecutiveFails == c.config.AlertThreshold {
-		go c.spawnCCAgent(res, state)
+	if firePersistent && c.onPersistentAlert != nil {
+		c.onPersistentAlert(res.Name, stateCopy)
 	}
+
+	if fireGaveUp && c.onCCAgentExhausted != nil {
+		c.onCCAgentExhausted(res.Name, stateCopy)
+	}
+
+	if spawnAgent {
+		go c.spawnCCAgent(res, &stateCopy)
+	}
+}
+
+func (c *Checker) GetResourceState(name string) (ResourceState, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	state, ok := c.resourceStates[name]
+	if !ok {
+		return ResourceState{}, false
+	}
+	return *state, true
+}
+
+func (c *Checker) RunResourceCheck(name string) (*ResourceState, bool) {
+	var resCfg *ResourceConfig
+	for i := range c.config.Resources {
+		if c.config.Resources[i].Name == name {
+			resCfg = &c.config.Resources[i]
+			break
+		}
+	}
+	if resCfg == nil {
+		return nil, false
+	}
+	c.checkResource(*resCfg)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	state := c.resourceStates[name]
+	if state == nil {
+		return nil, false
+	}
+	stateCopy := *state
+	return &stateCopy, true
 }
 
 func checkDisk(path string) (float64, string, error) {
@@ -160,13 +242,10 @@ func checkMemory() (float64, string, error) {
 }
 
 func (c *Checker) spawnCCAgent(res ResourceConfig, state *ResourceState) {
-	claudePath := c.config.ClaudePath
-	if claudePath == "" {
-		claudePath = "claude"
-	}
-	workdir := c.config.ClaudeWorkdir
-	if workdir == "" {
-		workdir = expandHome("~/")
+	bridgeURL := c.config.LLMBridgeURL
+	if bridgeURL == "" {
+		log.Printf("CC-AGENT: skipping spawn for %s: llm_bridge_url not configured", res.Name)
+		return
 	}
 
 	prompt := fmt.Sprintf(
@@ -176,23 +255,54 @@ func (c *Checker) spawnCCAgent(res ResourceConfig, state *ResourceState) {
 			"Report what you found and what you cleaned up.",
 		res.Type, state.UsagePct, res.Threshold, state.Detail, res.Type,
 	)
+	displayName := fmt.Sprintf("ALERT: %s usage critical at %.1f%%", res.Type, state.UsagePct)
+	clientID := fmt.Sprintf("healthcheck-%s-%d", res.Name, time.Now().Unix())
 
-	log.Printf("CC-AGENT: spawning for %s alert (%.1f%% >= %.1f%%)", res.Name, state.UsagePct, res.Threshold)
+	log.Printf("CC-AGENT: spawning bridge session for %s alert (%.1f%% >= %.1f%%)", res.Name, state.UsagePct, res.Threshold)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, claudePath,
-		"-p", prompt,
-		"--output-format", "stream-json",
-		"--dangerously-skip-permissions",
-		"--verbose",
-	)
-	cmd.Dir = workdir
-	out, err := cmd.CombinedOutput()
+	createBody, _ := json.Marshal(map[string]any{
+		"harness":      "claude_code",
+		"client_id":    clientID,
+		"display_name": displayName,
+		"source":       "healthcheck",
+		"auto_start":   true,
+	})
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(bridgeURL+"/sessions", "application/json", bytes.NewReader(createBody))
 	if err != nil {
-		log.Printf("CC-AGENT: failed for %s: %v\n%s", res.Name, err, string(out))
-	} else {
-		log.Printf("CC-AGENT: completed for %s", res.Name)
+		log.Printf("CC-AGENT: create session failed for %s: %v", res.Name, err)
+		return
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("CC-AGENT: create session returned %d for %s: %s", resp.StatusCode, res.Name, string(body))
+		return
+	}
+
+	var session struct {
+		BridgeID string `json:"bridge_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		log.Printf("CC-AGENT: decode session response for %s: %v", res.Name, err)
+		return
+	}
+	if session.BridgeID == "" {
+		log.Printf("CC-AGENT: empty bridge_id for %s", res.Name)
+		return
+	}
+
+	sendBody, _ := json.Marshal(map[string]string{"message": prompt})
+	sendResp, err := client.Post(bridgeURL+"/sessions/"+session.BridgeID+"/send", "application/json", bytes.NewReader(sendBody))
+	if err != nil {
+		log.Printf("CC-AGENT: send message to %s failed: %v", session.BridgeID, err)
+		return
+	}
+	defer sendResp.Body.Close()
+	if sendResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(sendResp.Body)
+		log.Printf("CC-AGENT: send message returned %d for %s: %s", sendResp.StatusCode, res.Name, string(body))
+		return
+	}
+	log.Printf("CC-AGENT: started session %s for %s", session.BridgeID, res.Name)
 }

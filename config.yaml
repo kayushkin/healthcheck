@@ -4,8 +4,6 @@ listen_addr: ":8099"
 log_file: "/tmp/healthcheck-alerts.log"
 nats_url: "nats://localhost:4222"
 llm_bridge_url: "http://localhost:8160"
-claude_path: "/home/kayushkincom/.local/share/mise/shims/claude"
-claude_workdir: "/home/kayushkincom"
 
 resources:
   - name: disk-root
@@ -151,6 +149,15 @@ services:
   - name: marginalia
     type: http
     url: http://localhost:8192/health
+
+  # Codex agent: ephemeral `codex app-server` process spawned by
+  # llm-bridge-codex. Probe the auth token + process freshness; recover by
+  # refreshing tokens and killing any stale long-lived app-server.
+  - name: codex
+    type: command
+    command: ["/home/kayushkincom/bin/codex-healthcheck"]
+    recovery_command: ["/home/kayushkincom/bin/codex-restart"]
+    recovery_timeout: 90s
 
   # System (non-user) units
   - name: llm-bridge

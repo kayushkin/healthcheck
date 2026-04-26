@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	a, err := alerter.New(cfg.LogFile, cfg.NatsURL)
+	a, err := alerter.New(cfg.LogFile, cfg.NatsURL, cfg.LLMBridgeURL)
 	if err != nil {
 		log.Fatalf("Failed to create alerter: %v", err)
 	}
@@ -30,8 +30,11 @@ func main() {
 	c := checker.New(cfg)
 	c.OnChange(a.OnStatusChange)
 	c.OnRestart(a.OnRestart)
+	c.OnPersistentAlert(a.OnPersistentAlert)
+	c.OnCCAgentExhausted(a.OnCCAgentExhausted)
 
 	srv := server.New(c, cfg.ListenAddr)
+	srv.OnEscalate(a.OnCCAgentExhausted)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -182,9 +182,15 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		c.onChange(svc.Name, oldStatus, newStatus)
 	}
 
-	// Auto-restart on failure
-	if checkErr != nil && svc.AutoRestart && svc.Type == "systemd" && state.ConsecutiveFails >= c.config.AlertThreshold {
-		go c.restartService(svc)
+	// Auto-recover on threshold breach. systemd services use systemctl
+	// restart; anything else (e.g. command checks) runs RecoveryCommand if
+	// configured.
+	if checkErr != nil && state.ConsecutiveFails >= c.config.AlertThreshold {
+		if svc.AutoRestart && svc.Type == "systemd" {
+			go c.restartService(svc)
+		} else if len(svc.RecoveryCommand) > 0 {
+			go c.runRecovery(svc)
+		}
 	}
 }
 
@@ -250,6 +256,25 @@ func (c *Checker) restartService(svc ServiceConfig) {
 	success := err == nil
 	if c.onRestart != nil {
 		c.onRestart(svc.Name, success, err)
+	}
+}
+
+func (c *Checker) runRecovery(svc ServiceConfig) {
+	timeout := svc.RecoveryTimeout
+	if timeout == 0 {
+		timeout = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, svc.RecoveryCommand[0], svc.RecoveryCommand[1:]...)
+	out, err := cmd.CombinedOutput()
+	success := err == nil
+	if c.onRestart != nil {
+		var reportErr error
+		if err != nil {
+			reportErr = fmt.Errorf("recovery_command: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		c.onRestart(svc.Name, success, reportErr)
 	}
 }
 

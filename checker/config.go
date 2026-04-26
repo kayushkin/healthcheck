@@ -13,8 +13,6 @@ type Config struct {
 	ListenAddr     string           `yaml:"listen_addr"`
 	LogFile        string           `yaml:"log_file"`
 	BusURL         string           `yaml:"bus_url"`
-	ClaudePath     string           `yaml:"claude_path"`
-	ClaudeWorkdir  string           `yaml:"claude_workdir"`
 	NatsURL        string           `yaml:"nats_url"`
 	LLMBridgeURL   string           `yaml:"llm_bridge_url"`
 	Services       []ServiceConfig  `yaml:"services"`
@@ -23,15 +21,17 @@ type Config struct {
 }
 
 type ServiceConfig struct {
-	Name         string        `yaml:"name"`
-	Type         string        `yaml:"type"` // http, systemd, command
-	URL          string        `yaml:"url,omitempty"`
-	Timeout      time.Duration `yaml:"timeout,omitempty"`
-	Unit         string        `yaml:"unit,omitempty"`
-	SystemUnit   bool          `yaml:"system_unit,omitempty"` // systemctl runs without --user when true
-	Command      []string      `yaml:"command,omitempty"`
-	ExpectOutput string        `yaml:"expect_output,omitempty"`
-	AutoRestart  bool          `yaml:"auto_restart,omitempty"`
+	Name            string        `yaml:"name"`
+	Type            string        `yaml:"type"` // http, systemd, command
+	URL             string        `yaml:"url,omitempty"`
+	Timeout         time.Duration `yaml:"timeout,omitempty"`
+	Unit            string        `yaml:"unit,omitempty"`
+	SystemUnit      bool          `yaml:"system_unit,omitempty"` // systemctl runs without --user when true
+	Command         []string      `yaml:"command,omitempty"`
+	ExpectOutput    string        `yaml:"expect_output,omitempty"`
+	AutoRestart     bool          `yaml:"auto_restart,omitempty"`
+	RecoveryCommand []string      `yaml:"recovery_command,omitempty"` // run on AlertThreshold consecutive failures
+	RecoveryTimeout time.Duration `yaml:"recovery_timeout,omitempty"` // defaults to 90s
 }
 
 type ResourceConfig struct {
