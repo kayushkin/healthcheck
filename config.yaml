@@ -115,11 +115,6 @@ services:
     unit: forge-api
     auto_restart: true
 
-  - name: apiauth
-    type: systemd
-    unit: apiauth
-    auto_restart: true
-
   - name: auth-store
     type: systemd
     unit: auth-store
