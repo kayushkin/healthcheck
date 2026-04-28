@@ -120,6 +120,11 @@ services:
     unit: apiauth
     auto_restart: true
 
+  - name: auth-store
+    type: systemd
+    unit: auth-store
+    auto_restart: true
+
   - name: mailstack
     type: systemd
     unit: mailstack
