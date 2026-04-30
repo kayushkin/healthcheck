@@ -3,6 +3,7 @@ package checker
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -30,6 +31,7 @@ type ServiceState struct {
 	Version           string    `json:"version,omitempty"`
 	VersionDrift      int       `json:"version_drift,omitempty"`
 	LastError         string    `json:"last_error,omitempty"`
+	EnabledState      string    `json:"enabled_state,omitempty"` // systemctl is-enabled output (only set for type=systemd)
 }
 
 type uptimeRecord struct {
@@ -133,12 +135,14 @@ func (c *Checker) checkAll() {
 func (c *Checker) checkService(svc ServiceConfig) {
 	start := time.Now()
 	var checkErr error
+	var enabledState string
 
 	switch svc.Type {
 	case "http":
 		checkErr = c.checkHTTP(svc)
 	case "systemd":
 		checkErr = c.checkSystemd(svc)
+		enabledState = systemdIsEnabled(svc)
 	case "command":
 		checkErr = c.checkCommand(svc)
 	default:
@@ -153,6 +157,7 @@ func (c *Checker) checkService(svc ServiceConfig) {
 
 	state.LastCheck = time.Now()
 	state.ResponseMs = elapsed.Milliseconds()
+	state.EnabledState = enabledState
 
 	if checkErr != nil {
 		state.ConsecutiveFails++
@@ -192,6 +197,14 @@ func (c *Checker) checkService(svc ServiceConfig) {
 			go c.runRecovery(svc)
 		}
 	}
+
+	// Registry is the source of truth: a service listed here is one we want
+	// running at boot. If systemd reports it disabled, enable it now so it
+	// auto-starts on next reboot. (Does not start the service — restart is
+	// already handled by AutoRestart on a separate signal.)
+	if svc.Type == "systemd" && enabledState == "disabled" {
+		go c.ensureEnabled(svc)
+	}
 }
 
 func (c *Checker) checkHTTP(svc ServiceConfig) error {
@@ -223,6 +236,30 @@ func (c *Checker) checkSystemd(svc ServiceConfig) error {
 		return fmt.Errorf("unit %s is %s", svc.Unit, status)
 	}
 	return nil
+}
+
+// systemdIsEnabled returns the raw `systemctl is-enabled` output (e.g.
+// "enabled", "disabled", "static", "masked"). Empty string on lookup error.
+func systemdIsEnabled(svc ServiceConfig) string {
+	args := systemctlArgs(svc, "is-enabled", svc.Unit)
+	cmd := exec.Command("systemctl", args...)
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
+}
+
+// ensureEnabled runs `systemctl enable` for a registered systemd service that
+// is currently disabled. Logs loudly on failure so a permission/path issue
+// surfaces in journalctl instead of silently leaving the service unbootable.
+func (c *Checker) ensureEnabled(svc ServiceConfig) {
+	args := systemctlArgs(svc, "enable", svc.Unit)
+	cmd := exec.Command("systemctl", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("auto-enable failed for %s (unit=%s system=%v): %v: %s",
+			svc.Name, svc.Unit, svc.SystemUnit, err, strings.TrimSpace(string(out)))
+		return
+	}
+	log.Printf("auto-enabled %s (unit=%s system=%v)", svc.Name, svc.Unit, svc.SystemUnit)
 }
 
 func systemctlArgs(svc ServiceConfig, verb, unit string) []string {

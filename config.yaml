@@ -34,19 +34,14 @@ services:
     unit: dash-server
     auto_restart: true
 
-  - name: claude-code-adapter
+  - name: inber-party
     type: systemd
-    unit: claude-code-adapter
+    unit: inber-party
     auto_restart: true
 
   - name: inber-server
     type: systemd
     unit: inber-server
-    auto_restart: true
-
-  - name: inber-party
-    type: systemd
-    unit: inber-party
     auto_restart: true
 
   - name: logstack
@@ -69,9 +64,9 @@ services:
     unit: skill-store
     auto_restart: true
 
-  - name: openclaw-adapter
+  - name: tool-store
     type: systemd
-    unit: openclaw-adapter
+    unit: tool-store
     auto_restart: true
 
   - name: multichat-server
@@ -125,24 +120,9 @@ services:
     unit: mailstack
     auto_restart: true
 
-  - name: openclaw-gateway
-    type: systemd
-    unit: openclaw-gateway
-    auto_restart: false
-
   - name: usage-store
     type: systemd
     unit: usage-store
-    auto_restart: true
-
-  - name: bus
-    type: systemd
-    unit: bus
-    auto_restart: true
-
-  - name: tunnel-server
-    type: systemd
-    unit: tunnel-server
     auto_restart: true
 
   # Services without systemd units — checked by HTTP health endpoint
