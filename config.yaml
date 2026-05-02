@@ -169,15 +169,3 @@ services:
     unit: argraphments
     system_unit: true
     auto_restart: true
-
-  - name: mangastack
-    type: systemd
-    unit: mangastack
-    system_unit: true
-    auto_restart: true
-
-  - name: podcaststack
-    type: systemd
-    unit: podcaststack
-    system_unit: true
-    auto_restart: true
