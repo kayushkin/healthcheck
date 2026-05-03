@@ -69,6 +69,11 @@ services:
     unit: tool-store
     auto_restart: true
 
+  - name: permission-store
+    type: systemd
+    unit: permission-store
+    auto_restart: true
+
   - name: multichat-server
     type: systemd
     unit: multichat-server
