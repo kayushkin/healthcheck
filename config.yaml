@@ -74,6 +74,11 @@ services:
     unit: permission-store
     auto_restart: true
 
+  - name: kanban-store
+    type: systemd
+    unit: kanban-store
+    auto_restart: true
+
   - name: multichat-server
     type: systemd
     unit: multichat-server
