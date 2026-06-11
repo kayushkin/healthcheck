@@ -238,13 +238,15 @@ func (a *Alerter) OnRestart(name string, success bool, err error) {
 
 	if a.nats != nil {
 		go func() {
-			_ = a.nats.Publish("health.restart", HealthEvent{
+			if err := a.nats.Publish("health.restart", HealthEvent{
 				Type:      "healthcheck.restart",
 				Service:   name,
 				NewStatus: status,
 				Timestamp: time.Now().Format(time.RFC3339),
 				Message:   msg,
-			})
+			}); err != nil {
+				log.Printf("Failed to publish to NATS: %v", err)
+			}
 		}()
 	}
 }
