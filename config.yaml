@@ -159,6 +159,23 @@ services:
     recovery_command: ["/home/kayushkincom/bin/codex-restart"]
     recovery_timeout: 90s
 
+  # Clean-checkout build guard. Answers one question: does every repo still
+  # compile from its COMMITTED HEAD, as opposed to from somebody's working tree?
+  # Seven did not, and nobody knew for as long as 3.5 months, because a working
+  # tree builds for reasons a fresh clone does not inherit.
+  #
+  # The expensive sweep runs nightly under the scheduler and leaves its verdict
+  # in report.json; this check only reads that verdict, so it is cheap enough to
+  # poll on the 60s interval. No auto_restart — there is nothing to restart, the
+  # failure is in a git tree and a human has to fix it.
+  #
+  # Reports STALE as loudly as BROKEN: a guard that quietly stopped running looks
+  # exactly like a guard that is passing, and that equivalence is the whole bug.
+  - name: repo-build-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-build-audit-status.sh"]
+    expect_output: "ok"
+
   # System (non-user) units
   - name: llm-bridge
     type: systemd
