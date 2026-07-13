@@ -24,9 +24,19 @@ services:
     auto_restart: true
 
 
+  # kayushkin.com is a SYSTEM unit (/etc/systemd/system/kayushkin.service) — it is
+  # the process that actually binds :8080 and serves the site.
+  #
+  # Without system_unit, this check ran `systemctl --user is-active kayushkin` and
+  # so watched a SECOND, shadow unit of the same name in ~/.config/systemd/user/.
+  # That shadow can never start while the real one holds :8080, so it died on
+  # `bind: address already in use` and auto_restart dutifully restarted it — for
+  # 811,295 restarts. The check was therefore both permanently red and actively
+  # harmful, and its green state would have meant the real site was DOWN.
   - name: kayushkin
     type: systemd
     unit: kayushkin
+    system_unit: true
     auto_restart: true
 
   - name: dash-server
