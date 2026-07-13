@@ -186,6 +186,23 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-build-audit-status.sh"]
     expect_output: "ok"
 
+  # Boot-and-answer guard (tier 2). Compiling is necessary and not sufficient:
+  # Go 1.22+ ServeMux panics on a conflicting route pattern at REGISTRATION time,
+  # so a route collision is invisible to the compiler and fatal at boot — which
+  # is exactly what agent-store 3876e8e did to llm-bridge-server, across a repo
+  # boundary. noteboard is the standing proof that green != alive: its tree
+  # compiles clean and a bare `go build` yields a binary that dies on its first
+  # request with `no such module: fts5`.
+  #
+  # So the nightly sweep also runs each repo's committed scripts/e2e-smoke.sh
+  # from the clean clone and asserts the binary boots and answers a real route.
+  # Same shape as repo-build-guard: the expensive part runs under the scheduler,
+  # this check only reads the verdict, and STALE fails as loudly as BROKEN.
+  - name: repo-smoke-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-smoke-status.sh"]
+    expect_output: "ok"
+
   # System (non-user) units
   - name: llm-bridge
     type: systemd

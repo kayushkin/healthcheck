@@ -34,28 +34,61 @@
 # the guard cry wolf nightly — and a guard everyone has learned to ignore is
 # worse than no guard at all.
 #
-# Consumed by scripts/repo-build-audit-status.sh, which healthcheck polls.
+# Tier 2: --smoke
+# ---------------
+# Compiling is necessary and not sufficient. A repo can build green and still
+# ship a DEAD binary: Go 1.22+ `http.ServeMux` panics on a conflicting route
+# pattern at REGISTRATION time, so a route collision is invisible to the
+# compiler and fatal at boot. That is not hypothetical — it is what agent-store
+# `3876e8e` did to llm-bridge-server, across a repo boundary, without either
+# repo changing a line of the other's code.
+#
+# `--smoke` answers the next question: does the committed HEAD still BOOT and
+# ANSWER? For every repo whose HEAD ships an executable `scripts/e2e-smoke.sh`,
+# it clones that HEAD, resolves the same relative-`replace` siblings, and runs
+# the smoke from inside the clean clone. The convention IS the registration —
+# there is no service list to keep in sync with reality, because a list is one
+# more thing that can silently drift out of date.
+#
+# Smokes run with HOME redirected into a scratch directory (see run_smoke).
+# A smoke that forgets to override its DB path must not be able to open the
+# LIVE database of the service it is testing — an audit that can damage what it
+# audits is worse than no audit.
+#
+# Consumed by scripts/repo-build-audit-status.sh and scripts/repo-smoke-status.sh,
+# which healthcheck polls.
 
 set -uo pipefail
 
+MODE=build
+
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/repo-build-audit}"
-REPORT="${REPORT:-$STATE_DIR/report.json}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d /tmp/repo-build-audit.XXXXXX)}"
 STAGE_TIMEOUT="${STAGE_TIMEOUT:-600}"
+SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
 WITH_TESTS=0
 ONLY=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --smoke) MODE=smoke ;;
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
-      sed -n '2,40p' "$0"; exit 0 ;;
+      sed -n '2,60p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+# Each mode owns its own report. They run as separate scheduler jobs, and two
+# jobs writing one file would race and clobber each other's verdict.
+if [ "$MODE" = "smoke" ]; then
+  REPORT="${REPORT:-$STATE_DIR/smoke-report.json}"
+else
+  REPORT="${REPORT:-$STATE_DIR/report.json}"
+fi
 
 mkdir -p "$STATE_DIR"
 trap 'rm -rf "$WORK_ROOT"' EXIT
@@ -162,23 +195,106 @@ run_stage() {  # run_stage <dir> <stage...> ; captures output into STAGE_OUT
   return $?
 }
 
+# The go caches live under the real HOME. Resolve them ONCE, before any smoke
+# runs, so that redirecting HOME below cannot make every smoke re-download the
+# whole module graph from the network — which would turn a nightly guard into a
+# nightly outbound-traffic burst that fails whenever the proxy hiccups.
+REAL_GOCACHE="$(go env GOCACHE)"
+REAL_GOMODCACHE="$(go env GOMODCACHE)"
+REAL_GOPATH="$(go env GOPATH)"
+
+# smoke_status <repo_src> — is there a smoke to run, and can it actually run?
+#   yes         HEAD ships scripts/e2e-smoke.sh, mode 100755
+#   not-exec    HEAD ships it, but not executable — a FAILURE, see below
+#   none        HEAD does not ship one
+#
+# Checked against HEAD, not the working tree, for the same reason the build is:
+# a smoke that exists only on someone's disk guards nothing.
+#
+# not-exec is a hard failure rather than a skip. A non-executable smoke silently
+# does not run, and a guard that silently does not run is indistinguishable from
+# a guard that is passing — the precise equivalence that let a broken tree ship
+# for three and a half months.
+smoke_status() {
+  local src="$1" line
+  line=$(git -C "$src" ls-tree HEAD -- scripts/e2e-smoke.sh 2>/dev/null)
+  [ -n "$line" ] || { echo none; return; }
+  case "$line" in
+    100755*) echo yes ;;
+    *)       echo not-exec ;;
+  esac
+}
+
+# run_smoke <repo_dir> <scratch> — run the repo's own smoke from the clean clone.
+#
+# HOME points at a scratch directory that is thrown away afterwards. Every
+# service here defaults its SQLite path to something under $HOME, so a smoke
+# that forgets to override that path would otherwise open — and write to — the
+# LIVE database of the very service it is testing, nightly, unattended. With
+# HOME redirected, the worst such a bug can do is create a stray file in a temp
+# directory. The go caches are passed through explicitly (above) because they
+# are the one thing under HOME that a build legitimately needs.
+run_smoke() {
+  local dir="$1" scratch="$2"
+  mkdir -p "$scratch/home"
+  STAGE_OUT=$(cd "$dir" && timeout "$SMOKE_TIMEOUT" nice -n 10 \
+    env \
+      HOME="$scratch/home" \
+      XDG_CONFIG_HOME="$scratch/home/.config" \
+      XDG_STATE_HOME="$scratch/home/.local/state" \
+      XDG_DATA_HOME="$scratch/home/.local/share" \
+      XDG_CACHE_HOME="$scratch/home/.cache" \
+      GOCACHE="$REAL_GOCACHE" \
+      GOMODCACHE="$REAL_GOMODCACHE" \
+      GOPATH="$REAL_GOPATH" \
+      GOFLAGS= GOWORK=off \
+      PATH="$PATH" \
+      ./scripts/e2e-smoke.sh 2>&1)
+  return $?
+}
+
 results=()   # name<TAB>status<TAB>stage<TAB>seconds<TAB>detail
 total=0; ok=0; failed=0; unguarded=0
+no_smoke=0   # smoke mode only: repos with a committed HEAD but no smoke to run
 
 for path in "$REPOS_DIR"/*/; do
   name=$(basename "$path")
   [ -f "$path/go.mod" ] || continue
   [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
-  total=$((total + 1))
 
   if ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
     # No committed HEAD exists, so there is nothing for this guard to verify.
     # Report it rather than passing it silently: an unguarded repo is precisely
     # where the next 3.5-month break will live.
+    total=$((total + 1))
     results+=("$name	unguarded	-	0	not a git repo — no committed HEAD to build")
     unguarded=$((unguarded + 1))
     echo "UNGUARDED $name (not a git repo)"
     continue
+  fi
+
+  if [ "$MODE" = "smoke" ]; then
+    # A repo with no main package produces no binary, so there is nothing to
+    # boot and it is out of scope — not a coverage gap. Asked of HEAD, not the
+    # working tree, and answered without the go toolchain so that the coverage
+    # count costs nothing.
+    git -C "$path" grep -qE '^package main$' HEAD -- '*.go' 2>/dev/null || continue
+    total=$((total + 1))
+
+    case "$(smoke_status "$path")" in
+      none)
+        no_smoke=$((no_smoke + 1))
+        results+=("$name	no-smoke	-	0	HEAD ships no scripts/e2e-smoke.sh — this binary is never booted by the guard")
+        echo "NO-SMOKE  $name"
+        continue ;;
+      not-exec)
+        failed=$((failed + 1))
+        results+=("$name	fail	mode	0	scripts/e2e-smoke.sh is committed non-executable (mode is not 100755), so it would silently never run")
+        echo "FAIL      $name — scripts/e2e-smoke.sh committed non-executable"
+        continue ;;
+    esac
+  else
+    total=$((total + 1))
   fi
 
   ws="$WORK_ROOT/$name"
@@ -195,6 +311,46 @@ for path in "$REPOS_DIR"/*/; do
   degraded=$(resolve_replaces "$ws/$name" "$ws" | tr '\n' ' ' | sed 's/ *$//')
 
   status="ok"; stage="-"; detail=""
+
+  if [ "$MODE" = "smoke" ]; then
+    # The workspace deliberately mirrors ~/repos: the repo sits at $ws/$name and
+    # its replace-siblings sit beside it at $ws/<sibling>. A smoke that reaches
+    # for a sibling the way llm-bridge-server's does — $(dirname $REPO_DIR)/log-store
+    # — therefore resolves to the sibling's CLEAN CLONE, not to a working tree.
+    run_smoke "$ws/$name" "$ws"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      status="fail"; stage="smoke"
+      detail=$(echo "$STAGE_OUT" | grep -vE '^\s*$' | tail -8 | tr '\n' ' ' | cut -c1-500)
+      [ "$rc" -eq 124 ] && detail="smoke timed out after ${SMOKE_TIMEOUT}s"
+    fi
+
+    secs=$(( $(date +%s) - repo_start ))
+    if [ "$status" = "ok" ]; then
+      ok=$((ok + 1))
+      # A hermetic smoke writes nothing under HOME. One that does still passes —
+      # it is not a broken binary — but it is one missing override away from
+      # having written to the LIVE database instead, so say so out loud.
+      #
+      # The go toolchain's own footprint is excluded: it plants .config/go and
+      # .cache under whatever HOME it is handed, no matter what the smoke does.
+      # Reporting that would mark every repo non-hermetic, and a warning that
+      # fires on everything says nothing.
+      strays=$(find "$ws/home" -mindepth 1 -maxdepth 3 \
+        -not -path "$ws/home/.cache*" \
+        -not -path "$ws/home/.config" \
+        -not -path "$ws/home/.config/go*" \
+        2>/dev/null | head -3 | tr '\n' ' ')
+      [ -n "$strays" ] && detail="not hermetic — wrote under HOME: $strays"
+      echo "OK        $name (${secs}s)${detail:+  [$detail]}"
+    else
+      failed=$((failed + 1))
+      echo "FAIL      $name — smoke: $detail"
+    fi
+    results+=("$name	$status	$stage	$secs	$detail")
+    rm -rf "$ws"
+    continue
+  fi
 
   # The two `go build` invocations have opposite failure modes, so choose per repo:
   #
@@ -258,7 +414,8 @@ printf '%s\n' "${results[@]}" |
   DURATION=$((finished_epoch - start_epoch)) \
   GO_VERSION="$(go env GOVERSION)" \
   WITH_TESTS="$WITH_TESTS" \
-  TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" \
+  MODE="$MODE" \
+  TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
   REPORT="$REPORT" \
   python3 -c '
 import json, os, sys
@@ -271,25 +428,37 @@ for line in sys.stdin.read().splitlines():
         "repo": name, "status": status, "stage": stage,
         "seconds": int(secs), "detail": rest[0] if rest else "",
     })
+mode = os.environ["MODE"]
 report = {
+    "mode": mode,
     "generated_at": os.environ["STARTED_AT"],
     "duration_seconds": int(os.environ["DURATION"]),
     "go_version": os.environ["GO_VERSION"],
-    "with_tests": os.environ["WITH_TESTS"] == "1",
     "repos_total": int(os.environ["TOTAL"]),
     "ok": int(os.environ["OK"]),
     "failed": int(os.environ["FAILED"]),
-    "unguarded": int(os.environ["UNGUARDED"]),
     "failures": [r for r in rows if r["status"] == "fail"],
     "results": rows,
 }
+if mode == "smoke":
+    # repos_total counts only repos that BUILD A BINARY — a library has nothing
+    # to boot, so counting it would make coverage look worse than it is.
+    report["no_smoke"] = int(os.environ["NO_SMOKE"])
+    report["without_smoke"] = [r["repo"] for r in rows if r["status"] == "no-smoke"]
+else:
+    report["with_tests"] = os.environ["WITH_TESTS"] == "1"
+    report["unguarded"] = int(os.environ["UNGUARDED"])
 with open(os.environ["REPORT"], "w") as fh:
     json.dump(report, fh, indent=2)
     fh.write("\n")
 '
 
 echo
-echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+if [ "$MODE" = "smoke" ]; then
+  echo "$ok/$total binaries boot and answer from a clean clone of HEAD; $failed failing, $no_smoke with no smoke to run ($(( finished_epoch - start_epoch ))s)"
+else
+  echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+fi
 echo "report: $REPORT"
 
 [ "$failed" -eq 0 ]
