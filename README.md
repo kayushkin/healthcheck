@@ -28,18 +28,44 @@ Infrastructure health monitor for Slava's services.
 
 ## Build & Run
 
+`main` lives at the repo root — there is no `cmd/` package.
+
 ```bash
-go build -o healthcheck ./cmd/healthcheck
+go build -o healthcheck .
 ./healthcheck -config config.yaml
 ```
 
-## Install as systemd service
+## Deploy
 
 ```bash
-cp deploy/healthcheck.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now healthcheck
+./deploy.sh
 ```
+
+Builds, runs the tests, installs the unit file and the binary to `~/bin/healthcheck`,
+restarts the user unit, and smoke-tests `/api/status`. The smoke test fails loudly
+on a stale binary and on any check that reports `misconfigured`.
+
+First-time install only:
+
+```bash
+systemctl --user enable healthcheck
+```
+
+## systemd checks: `system_unit` must match where the unit lives
+
+A `type: systemd` check probes `systemctl --user` by default, or `systemctl` when
+`system_unit: true`. If that flag disagrees with the manager the unit is actually
+registered under, the check watches nothing — and because `systemctl is-active`
+prints `inactive` both for a stopped unit and for one that does not exist, the
+mistake reads as a routine outage.
+
+The checker therefore probes `LoadState`, not `is-active`, and reports a unit it
+cannot find as **`misconfigured`** rather than `down`. The two are kept distinct on
+purpose: `down` means *fix the service*, `misconfigured` means *fix this config*.
+`auto_restart` is suppressed for a misconfigured check — restarting a unit that
+does not exist can never succeed, and when the phantom unit does exist but can
+never start (a shadow user unit whose port the real system unit already holds),
+that retry loop is unbounded. It once reached 811,295 restarts.
 
 ## API
 

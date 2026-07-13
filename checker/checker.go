@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,7 +19,33 @@ const (
 	StatusDown    Status = "down"
 	StatusDegraded Status = "degraded"
 	StatusUnknown Status = "unknown"
+	// StatusMisconfigured means the check itself is wrong — it is watching
+	// something that does not exist — so it reports nothing about the service.
+	// Distinct from StatusDown ("the service is not running"), because the two
+	// demand opposite responses: down wants the service restarted,
+	// misconfigured wants the *config* fixed and must never drive a restart.
+	StatusMisconfigured Status = "misconfigured"
 )
+
+// UnitNotFoundError reports that a systemd check names a unit that does not
+// exist under the manager it probed — i.e. `system_unit` disagrees with where
+// the unit actually lives, or the unit is gone. This is a config bug, not a
+// service outage, and callers must treat it as one.
+type UnitNotFoundError struct {
+	Unit       string
+	SystemUnit bool
+}
+
+func (e *UnitNotFoundError) Error() string {
+	manager := "the user manager (systemctl --user)"
+	fix := "set system_unit: true if it is a system unit"
+	if e.SystemUnit {
+		manager = "the system manager (systemctl)"
+		fix = "remove system_unit: true if it is a user unit"
+	}
+	return fmt.Sprintf("unit %s does not exist under %s — this check is watching nothing; %s",
+		e.Unit, manager, fix)
+}
 
 type ServiceState struct {
 	Name              string    `json:"name"`
@@ -159,12 +186,22 @@ func (c *Checker) checkService(svc ServiceConfig) {
 	state.ResponseMs = elapsed.Milliseconds()
 	state.EnabledState = enabledState
 
+	// A check that names a unit which does not exist is broken config, and it is
+	// broken deterministically — there is nothing to ramp up to, so it does not
+	// wait for AlertThreshold the way a flaky service does. Report it on the
+	// first observation.
+	var unitNotFound *UnitNotFoundError
+	misconfigured := errors.As(checkErr, &unitNotFound)
+
 	if checkErr != nil {
 		state.ConsecutiveFails++
 		state.LastError = checkErr.Error()
-		if state.ConsecutiveFails >= c.config.AlertThreshold {
+		switch {
+		case misconfigured:
+			state.Status = StatusMisconfigured
+		case state.ConsecutiveFails >= c.config.AlertThreshold:
 			state.Status = StatusDown
-		} else {
+		default:
 			state.Status = StatusDegraded
 		}
 	} else {
@@ -172,6 +209,7 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		state.Status = StatusUp
 		state.LastError = ""
 	}
+	consecutiveFails := state.ConsecutiveFails
 
 	// Record uptime history
 	c.history[svc.Name] = append(c.history[svc.Name], uptimeRecord{
@@ -190,7 +228,17 @@ func (c *Checker) checkService(svc ServiceConfig) {
 	// Auto-recover on threshold breach. systemd services use systemctl
 	// restart; anything else (e.g. command checks) runs RecoveryCommand if
 	// configured.
-	if checkErr != nil && state.ConsecutiveFails >= c.config.AlertThreshold {
+	//
+	// A misconfigured check is never recovered from. Restarting a unit that does
+	// not exist cannot succeed, so auto_restart would retry it every interval
+	// forever — and when the phantom unit DOES exist but can never start (a
+	// shadow user unit whose port is already held by the real system unit), that
+	// loop is unbounded and real: it once drove 811,295 restarts. The check is
+	// wrong, so the only valid recovery is a human fixing the config.
+	if misconfigured {
+		log.Printf("MISCONFIGURED CHECK %s: %v (auto-restart suppressed; fix config.yaml)",
+			svc.Name, checkErr)
+	} else if checkErr != nil && consecutiveFails >= c.config.AlertThreshold {
 		if svc.AutoRestart && svc.Type == "systemd" {
 			go c.restartService(svc)
 		} else if len(svc.RecoveryCommand) > 0 {
@@ -224,16 +272,34 @@ func (c *Checker) checkHTTP(svc ServiceConfig) error {
 	return nil
 }
 
+// checkSystemd asks for LoadState alongside ActiveState rather than using
+// `systemctl is-active`. is-active prints "inactive" both for a unit that is
+// stopped and for one that does not exist at all, so it cannot tell a service
+// outage from a check pointed at the wrong systemd manager. LoadState can:
+// "not-found" means the unit is not there. Conflating them is what let a check
+// stay red for a service that was up, while its auto_restart hammered a unit
+// that could never start.
 func (c *Checker) checkSystemd(svc ServiceConfig) error {
-	args := systemctlArgs(svc, "is-active", svc.Unit)
+	args := systemctlArgs(svc, "show", svc.Unit+".service")
+	args = append(args, "--property=LoadState", "--property=ActiveState", "--value")
 	cmd := exec.Command("systemctl", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("unit %s: %s", svc.Unit, strings.TrimSpace(string(out)))
+		return fmt.Errorf("unit %s: systemctl show failed: %v: %s",
+			svc.Unit, err, strings.TrimSpace(string(out)))
 	}
-	status := strings.TrimSpace(string(out))
-	if status != "active" {
-		return fmt.Errorf("unit %s is %s", svc.Unit, status)
+
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) != 2 {
+		return fmt.Errorf("unit %s: unparseable systemctl show output: %q", svc.Unit, string(out))
+	}
+	loadState, activeState := lines[0], lines[1]
+
+	if loadState == "not-found" {
+		return &UnitNotFoundError{Unit: svc.Unit, SystemUnit: svc.SystemUnit}
+	}
+	if activeState != "active" {
+		return fmt.Errorf("unit %s is %s", svc.Unit, activeState)
 	}
 	return nil
 }
