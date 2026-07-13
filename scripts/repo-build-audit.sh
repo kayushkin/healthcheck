@@ -55,8 +55,50 @@
 # LIVE database of the service it is testing — an audit that can damage what it
 # audits is worse than no audit.
 #
-# Consumed by scripts/repo-build-audit-status.sh and scripts/repo-smoke-status.sh,
-# which healthcheck polls.
+# Tier 1, the other half: --node
+# ------------------------------
+# Everything above walks `go.mod` and stops there, which left every TypeScript
+# tree in the fleet unguarded — and they are a MORE plausible home for this bug
+# class than the Go repos, not less.
+#
+# `file:../sibling` is npm's `replace ../sibling`, with the same blindness and
+# one extra teeth: a Go sibling is compiled from source, but an npm sibling is
+# consumed through its `main`/`exports` entry point, which is usually a BUILD
+# ARTIFACT. If that artifact is gitignored and nothing rebuilds it, the consumer
+# builds only on a machine where the sibling's output directory happens to
+# already be lying around — the purest possible form of "works on my machine".
+#
+# That was not hypothetical either. kayushkin.com — the live site — could not be
+# built from its committed source: it links `file:../miditab`, miditab's `dist/`
+# is gitignored, and miditab had no `prepare` script, so the only reason the
+# build ever worked was a stray `~/repos/miditab/dist` somebody had built by hand
+# months earlier. deploy.sh runs `npm run build` and commits the bundle, so the
+# served frontend was reproducible on exactly one computer in the world. Same
+# shape as downloadstack's 3.5-month break, different language. Fixed in miditab
+# (`prepare`), and this guard is what stops it coming back.
+#
+# So --node clones each package's committed HEAD, clones the committed HEADs of
+# the siblings it links with `file:`, and runs the package's OWN declared build.
+#
+# Deliberately NOT run: a bolted-on `tsc --noEmit`.
+#   Seven of the nine packages already run `tsc` inside their build script, so
+#   for them it is redundant. The two that do not (kayushkin.com, claude-squad)
+#   never adopted it, and kayushkin.com has a pre-existing type error — gating on
+#   tsc would paint the guard red from day one over a repo whose build is fine
+#   and whose site is up. That is the `go test` decision above, for the same
+#   reason: a guard everyone has learned to ignore is worse than no guard.
+#   The repo's own build script is the contract; this runs THAT.
+#
+# The third stage, `artifact`, has no Go equivalent and is the reason this mode
+# earns its keep. bridge-ui, dash, llmux and kayushkin.com all COMMIT their build
+# output, and consumers serve it directly — so a committed bundle that no longer
+# matches its committed source ships stale JS to real users, silently, with a
+# clean `git status`. After building, this asserts the clean clone is UNCHANGED.
+# The build is deterministic (verified: byte-identical across runs, and the
+# committed hashes match), so any diff is real drift.
+#
+# Consumed by scripts/repo-build-audit-status.sh, scripts/repo-smoke-status.sh and
+# scripts/repo-node-status.sh, which healthcheck polls.
 
 set -uo pipefail
 
@@ -73,6 +115,7 @@ ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) MODE=smoke ;;
+    --node) MODE=node ;;
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
@@ -84,11 +127,17 @@ done
 
 # Each mode owns its own report. They run as separate scheduler jobs, and two
 # jobs writing one file would race and clobber each other's verdict.
-if [ "$MODE" = "smoke" ]; then
-  REPORT="${REPORT:-$STATE_DIR/smoke-report.json}"
-else
-  REPORT="${REPORT:-$STATE_DIR/report.json}"
-fi
+#
+# (The todo that asked for --node suggested folding its results into report.json
+# so the existing repo-build-guard check would cover both for free. It cannot:
+# that is the race above, and npm ci across the frontends is minutes where the Go
+# sweep is ~100s, so they cannot share a scheduler job under the 5-minute timeout
+# either. Own report, own check, own job — the shape --smoke already established.)
+case "$MODE" in
+  smoke) REPORT="${REPORT:-$STATE_DIR/smoke-report.json}" ;;
+  node)  REPORT="${REPORT:-$STATE_DIR/node-report.json}" ;;
+  *)     REPORT="${REPORT:-$STATE_DIR/report.json}" ;;
+esac
 
 mkdir -p "$STATE_DIR"
 trap 'rm -rf "$WORK_ROOT"' EXIT
@@ -111,12 +160,26 @@ trap 'rm -rf "$WORK_ROOT"' EXIT
 # Ask mise for the real toolchain binary and prepend THAT, shadowing any shim, so
 # an interactive run and the nightly run resolve the same go. Falls back to whatever
 # go is on PATH when mise is absent (e.g. a checkout on another host).
+#
+# node is resolved exactly the same way, and needs it MORE: there is no
+# /usr/bin/node on this host at all, so node and npm exist only under mise. A
+# --node run from the scheduler's empty Environment would otherwise die with
+# "npm: not found" every night — and repo-node-status.sh would report that as a
+# STALE report rather than a broken build, which is the quiet failure this whole
+# script exists to prevent.
 MISE_BIN="${MISE_BIN:-$HOME/.local/bin/mise}"
 if [ -x "$MISE_BIN" ]; then
-  mise_go="$("$MISE_BIN" which go 2>/dev/null)"
-  [ -n "$mise_go" ] && export PATH="$(dirname "$mise_go"):$PATH"
+  for tool in go node; do
+    real="$("$MISE_BIN" which "$tool" 2>/dev/null)"
+    [ -n "$real" ] && export PATH="$(dirname "$real"):$PATH"
+  done
 fi
-if ! command -v go >/dev/null 2>&1; then
+if [ "$MODE" = "node" ]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "FATAL: npm is not on PATH — cannot audit anything" >&2
+    exit 2
+  fi
+elif ! command -v go >/dev/null 2>&1; then
   echo "FATAL: go is not on PATH — cannot audit anything" >&2
   exit 2
 fi
@@ -199,9 +262,13 @@ run_stage() {  # run_stage <dir> <stage...> ; captures output into STAGE_OUT
 # runs, so that redirecting HOME below cannot make every smoke re-download the
 # whole module graph from the network — which would turn a nightly guard into a
 # nightly outbound-traffic burst that fails whenever the proxy hiccups.
-REAL_GOCACHE="$(go env GOCACHE)"
-REAL_GOMODCACHE="$(go env GOMODCACHE)"
-REAL_GOPATH="$(go env GOPATH)"
+if command -v go >/dev/null 2>&1; then
+  REAL_GOCACHE="$(go env GOCACHE)"
+  REAL_GOMODCACHE="$(go env GOMODCACHE)"
+  REAL_GOPATH="$(go env GOPATH)"
+else
+  REAL_GOCACHE=""; REAL_GOMODCACHE=""; REAL_GOPATH=""
+fi
 
 # smoke_status <repo_src> — is there a smoke to run, and can it actually run?
 #   yes         HEAD ships scripts/e2e-smoke.sh, mode 100755
@@ -304,6 +371,138 @@ run_smoke() {
   return $?
 }
 
+# list_node_packages — every package.json COMMITTED at HEAD, at the repo root or
+# one directory down (dash/, bridge-ui/ … but also argraphments/frontend/,
+# llm-bridge/ts/, claude-squad/web/). Prints "<repo>\t<subdir>", subdir empty at
+# the root.
+#
+# Asked of HEAD rather than the working tree, like everything else here: a
+# package.json that exists only on someone's disk is not something a fresh clone
+# would ever build. Depth is capped at 1 subdirectory so node_modules — which is
+# never committed, but is deep and enormous — cannot be walked into.
+list_node_packages() {
+  local path name
+  for path in "$REPOS_DIR"/*/; do
+    name=$(basename "$path")
+    git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    git -C "$path" ls-tree -r HEAD --name-only 2>/dev/null |
+      grep -E '^([^/]+/)?package\.json$' |
+      while IFS= read -r rel; do
+        printf '%s\t%s\n' "$name" "$(dirname "$rel" | sed 's/^\.$//')"
+      done
+  done
+}
+
+# lockfile_at_head <repo> <subdir> — which package manager does the COMMITTED
+# tree declare? Echoes "npm", "pnpm", "yarn" or "none".
+#
+# The lockfile is the declaration, not package.json's packageManager field: the
+# lockfile is what `npm ci` refuses to proceed without, and refusing is the point
+# — `npm ci` fails when the lockfile disagrees with package.json, which is
+# exactly the drift we are hunting. `npm install` would quietly reconcile them
+# and hide it, the same way `-mod=mod` hides go.mod drift.
+lockfile_at_head() {
+  local repo="$1" sub="$2" prefix="" f
+  [ -n "$sub" ] && prefix="$sub/"
+  for f in "package-lock.json npm" "pnpm-lock.yaml pnpm" "yarn.lock yarn"; do
+    set -- $f
+    if git -C "$REPOS_DIR/$repo" ls-tree HEAD --name-only -- "$prefix$1" 2>/dev/null | grep -q .; then
+      echo "$2"; return
+    fi
+  done
+  echo none
+}
+
+# resolve_file_deps <pkg_dir> <workspace> — clone the committed HEAD of every
+# sibling REPO reached through a `file:`/`link:` dependency, recursively.
+#
+# This is resolve_replaces for npm, and the workspace mirrors ~/repos for the
+# same reason: `file:../bridge-ui` is resolved by npm relative to the package
+# directory, so with the consumer at $ws/dash the link lands on $ws/bridge-ui —
+# the sibling's CLEAN CLONE, never a working tree. Targets can point inside a
+# repo (`file:../llm-bridge/ts`), so the first path segment under $ws is the repo
+# to provision and the rest is just a directory within it.
+#
+# A provisioned sibling is CLONED AND INSTALLED, but never BUILT. That line is
+# the whole discrimination this mode performs, and both halves are load-bearing:
+#
+#   Installed, because a linked package is resolved through its REAL path. Vite
+#   follows the symlink to $ws/bridge-ui/dist/*.js and then walks up from THERE
+#   looking for node_modules — so it never sees the consumer tree, even though
+#   npm correctly hoisted @xterm/xterm into it. The sibling needs its own
+#   node_modules, which is exactly why the fleet workflow says to build the
+#   library first and the consumers second. Cloning without installing would
+#   report dash and llmux broken when they are fine.
+#
+#   Never built, because `npm ci` runs a linked package's `prepare` script, and
+#   `prepare` is precisely npm-for-"produce my entry point before anyone consumes
+#   me". A sibling that declares one produces its artifact from its committed
+#   source; a sibling that does not, cannot — and that is a real defect in the
+#   sibling, not a gap in the guard. Running `npm run build` on siblings by hand
+#   would have turned kayushkin.com green while it remained unbuildable by anyone
+#   without a stale miditab/dist lying around. A guard that repairs the tree
+#   before judging it is not a guard.
+resolve_file_deps() {
+  local dir="$1" ws="$2" rel target sibrepo
+  [ -f "$dir/package.json" ] || return 0
+  local -a targets
+  mapfile -t targets < <(
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        pkg = json.load(fh)
+except Exception:
+    sys.exit(0)
+deps = {}
+for section in ("dependencies", "devDependencies", "optionalDependencies"):
+    deps.update(pkg.get(section) or {})
+for spec in deps.values():
+    if isinstance(spec, str):
+        for scheme in ("file:", "link:"):
+            if spec.startswith(scheme):
+                print(spec[len(scheme):])
+' "$dir/package.json"
+  )
+  for rel in "${targets[@]}"; do
+    [ -n "$rel" ] || continue
+    target=$(realpath -m "$dir/$rel")
+    case "$target" in
+      "$ws"/*) ;;
+      # A file: dep pointing outside the workspace cannot be satisfied from any
+      # committed HEAD. Say so instead of silently linking the real ~/repos tree.
+      *) echo "!$rel"; continue ;;
+    esac
+    sibrepo=${target#"$ws"/}
+    sibrepo=${sibrepo%%/*}
+    local how
+    how=$(provision "$sibrepo" "$ws")
+    case "$how" in
+      cached) continue ;;                 # already provisioned; don't recurse twice
+      clone) ;;
+      copy) echo "$sibrepo" ;;            # degraded: working tree, not a commit
+      *) echo "!$sibrepo"; continue ;;
+    esac
+    # Install the sibling from ITS committed lockfile. Not `npm run build` — see
+    # the header above; that distinction is the point of this mode.
+    #
+    # The result is REPORTED AS A TOKEN on stdout, not assigned to a variable:
+    # this function is called inside $(...), which is a subshell, so a variable
+    # set here would be silently discarded and the check would be dead code that
+    # always passes. (The same trap already cost this repo a smoke that printed
+    # FAIL and exited 0.) The caller parses these tokens.
+    if [ -f "$target/package-lock.json" ]; then
+      if ! (cd "$target" && timeout "$STAGE_TIMEOUT" nice -n 10 \
+              npm ci --no-audit --no-fund >/dev/null 2>&1); then
+        # A sibling whose own committed lockfile will not install is drift of the
+        # same family, and it must not be reported as the consumer's build bug.
+        echo "!install:$sibrepo"
+      fi
+    fi
+    resolve_file_deps "$target" "$ws"
+  done
+}
+
 # Fail fast, before any smoke boots: two smokes on one port make the guard flaky,
 # and a flaky guard is worse than no guard. See check_port_collisions.
 if [ "$MODE" = "smoke" ] && ! check_port_collisions; then
@@ -314,7 +513,145 @@ results=()   # name<TAB>status<TAB>stage<TAB>seconds<TAB>detail
 total=0; ok=0; failed=0; unguarded=0
 no_smoke=0   # smoke mode only: repos with a committed HEAD but no smoke to run
 
-for path in "$REPOS_DIR"/*/; do
+if [ "$MODE" = "node" ]; then
+  while IFS=$'\t' read -r repo sub; do
+    [ -n "$repo" ] || continue
+    pkg="$repo${sub:+/$sub}"
+    [ -n "$ONLY" ] && [ "$pkg" != "$ONLY" ] && [ "$repo" != "$ONLY" ] && continue
+    total=$((total + 1))
+
+    # A package with no committed lockfile cannot be installed reproducibly at
+    # all — `npm ci` refuses without one, and that refusal is the guard's whole
+    # premise. Report it rather than skipping it: an unguarded package is
+    # precisely where the next silent break will live. (Same call as the Go
+    # pass makes for a repo with no committed HEAD.)
+    pm=$(lockfile_at_head "$repo" "$sub")
+    if [ "$pm" = "none" ]; then
+      unguarded=$((unguarded + 1))
+      results+=("$pkg	unguarded	-	0	HEAD ships no lockfile — npm ci cannot install it reproducibly")
+      echo "UNGUARDED $pkg (no committed lockfile)"
+      continue
+    fi
+    if ! command -v "$pm" >/dev/null 2>&1; then
+      unguarded=$((unguarded + 1))
+      results+=("$pkg	unguarded	-	0	HEAD declares $pm (via its lockfile) but $pm is not installed on this host")
+      echo "UNGUARDED $pkg ($pm not installed)"
+      continue
+    fi
+
+    ws="$WORK_ROOT/node-$repo"
+    mkdir -p "$ws"
+    repo_start=$(date +%s)
+
+    how=$(provision "$repo" "$ws")
+    if [ "$how" != "clone" ]; then
+      results+=("$pkg	fail	clone	0	could not clone committed HEAD: $how")
+      failed=$((failed + 1)); echo "FAIL      $pkg (clone: $how)"
+      rm -rf "$ws"; continue
+    fi
+
+    dir="$ws/$repo${sub:+/$sub}"
+    dep_tokens=$(resolve_file_deps "$dir" "$ws")
+    # A sibling that will not install from its own committed lockfile is drift of
+    # the same family, and reporting it as the CONSUMER's build failure would send
+    # whoever reads this to the wrong repo entirely.
+    sibling_fail=$(echo "$dep_tokens" | sed -n 's/^!install://p' | tr '\n' ' ' | sed 's/ *$//')
+    degraded=$(echo "$dep_tokens" | grep -v '^!' | tr '\n' ' ' | sed 's/ *$//')
+
+    status="ok"; stage="-"; detail=""
+
+    if [ -n "$sibling_fail" ]; then
+      failed=$((failed + 1))
+      secs=$(( $(date +%s) - repo_start ))
+      results+=("$pkg	fail	sibling	$secs	the file: sibling $sibling_fail does not install from its own committed lockfile")
+      echo "FAIL      $pkg — sibling: $sibling_fail does not install from its committed lockfile"
+      rm -rf "$ws"; continue
+    fi
+
+    # install. `npm ci`, never `npm install` — see lockfile_at_head.
+    case "$pm" in
+      npm)  run_stage "$dir" npm ci --no-audit --no-fund ;;
+      pnpm) run_stage "$dir" pnpm install --frozen-lockfile ;;
+      yarn) run_stage "$dir" yarn install --frozen-lockfile ;;
+    esac
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      status="fail"; stage="install"
+      # npm puts the REASON at the top and pages of usage boilerplate underneath,
+      # so this reads from the head, not the tail. Tailing it produced the useless
+      # detail "aliases: clean-install, ic, install-clean" for a failure whose
+      # actual message was "package.json and package-lock.json are not in sync" —
+      # and that detail line is the entire thing a human sees at 03:30.
+      # head -3, not more: npm prints `code EUSAGE`, then the one sentence that
+      # actually explains it, then the first concrete fact (Missing: x from lock
+      # file). Line four is already into the option help ("Sets the strategy for
+      # installing packages..."), which is noise in an alert.
+      detail=$(echo "$STAGE_OUT" \
+        | sed 's/^npm error *//' \
+        | grep -vE '^[[:space:]]*$|^Usage:|^Options:|^Run "npm help|^aliases:|^Clean install a project|^npm ci$|^A complete log|^\[|^--' \
+        | head -3 | tr '\n' ' ' | cut -c1-500)
+      [ "$rc" -eq 124 ] && detail="$pm install timed out after ${STAGE_TIMEOUT}s"
+    fi
+
+    # build — the package's OWN declared script, and only if it declares one.
+    # A package with no build script (a types-only package, say) has nothing to
+    # build; that is not a coverage gap, and inventing a build for it would be
+    # asserting a contract the package never adopted.
+    if [ "$status" = "ok" ] && node -e '
+        const pkg = require(process.argv[1] + "/package.json");
+        process.exit((pkg.scripts && pkg.scripts.build) ? 0 : 1);
+      ' "$dir" 2>/dev/null; then
+      run_stage "$dir" npm run build
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        status="fail"; stage="build"
+        detail=$(echo "$STAGE_OUT" | grep -iE 'error|failed|not found|cannot|ENOENT' | head -4 | tr '\n' ' ' | cut -c1-500)
+        [ -z "$detail" ] && detail=$(echo "$STAGE_OUT" | grep -vE '^\s*$' | tail -4 | tr '\n' ' ' | cut -c1-500)
+        [ "$rc" -eq 124 ] && detail="build timed out after ${STAGE_TIMEOUT}s"
+      fi
+    fi
+
+    # artifact — the stage with no Go equivalent, and the reason this mode exists.
+    #
+    # bridge-ui, dash, llmux and kayushkin.com all COMMIT their build output, and
+    # what gets served IS that committed directory. So a bundle that no longer
+    # matches the source it claims to be built from is not a cosmetic diff — it
+    # is stale JavaScript shipped to real users, from a tree whose `git status`
+    # is clean and whose build is green.
+    #
+    # Having just built the committed source in a pristine clone, the clone must
+    # still be pristine. Anything else means the committed artifact is not what
+    # the committed source produces. Only fires where the output is tracked:
+    # where dist/ is gitignored (miditab, the frontends) git says nothing, so the
+    # check registers itself by the same convention the smokes do.
+    if [ "$status" = "ok" ]; then
+      dirty=$(git -C "$dir" status --porcelain 2>/dev/null | head -6 | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-400)
+      if [ -n "$dirty" ]; then
+        status="fail"; stage="artifact"
+        detail="committed build output is STALE — building the committed source changed the tree: $dirty"
+      fi
+    fi
+
+    secs=$(( $(date +%s) - repo_start ))
+    if [ "$status" = "ok" ]; then
+      ok=$((ok + 1))
+      [ -n "$degraded" ] && detail="verified against working-tree copies of: $degraded"
+      echo "OK        $pkg (${secs}s)${degraded:+  [degraded: $degraded]}"
+    else
+      failed=$((failed + 1))
+      echo "FAIL      $pkg — $stage: $detail"
+    fi
+    results+=("$pkg	$status	$stage	$secs	$detail")
+    rm -rf "$ws"
+  done < <(list_node_packages)
+fi
+
+# The Go sweep. Skipped wholesale in --node mode, which walks package.json
+# instead of go.mod and has already filled in results/counters above.
+repo_dirs=()
+[ "$MODE" != "node" ] && repo_dirs=("$REPOS_DIR"/*/)
+
+for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   name=$(basename "$path")
   [ -f "$path/go.mod" ] || continue
   [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
@@ -469,7 +806,8 @@ finished_epoch=$(date +%s)
 printf '%s\n' "${results[@]}" |
   STARTED_AT="$started_at" \
   DURATION=$((finished_epoch - start_epoch)) \
-  GO_VERSION="$(go env GOVERSION)" \
+  GO_VERSION="$(command -v go >/dev/null 2>&1 && go env GOVERSION || echo '')" \
+  NODE_VERSION="$(command -v node >/dev/null 2>&1 && node --version || echo '')" \
   WITH_TESTS="$WITH_TESTS" \
   MODE="$MODE" \
   TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
@@ -503,7 +841,18 @@ if mode == "smoke":
     report["no_smoke"] = int(os.environ["NO_SMOKE"])
     report["without_smoke"] = [r["repo"] for r in rows if r["status"] == "no-smoke"]
 else:
-    report["with_tests"] = os.environ["WITH_TESTS"] == "1"
+    if mode == "node":
+        # The unit here is a PACKAGE, not a repo: several repos keep their
+        # frontend in a subdirectory (argraphments/frontend, llm-bridge/ts), and
+        # a repo can hold more than one. Naming the count honestly keeps anyone
+        # from reading it against the 68 repos of the Go pass.
+        # (No apostrophes in this block: it is embedded in a single-quoted shell
+        # string, and a nested quote silently ends it.)
+        report["node_version"] = os.environ["NODE_VERSION"]
+        report["packages_total"] = int(os.environ["TOTAL"])
+        report["unguarded_packages"] = [r["repo"] for r in rows if r["status"] == "unguarded"]
+    else:
+        report["with_tests"] = os.environ["WITH_TESTS"] == "1"
     report["unguarded"] = int(os.environ["UNGUARDED"])
 with open(os.environ["REPORT"], "w") as fh:
     json.dump(report, fh, indent=2)
@@ -513,6 +862,8 @@ with open(os.environ["REPORT"], "w") as fh:
 echo
 if [ "$MODE" = "smoke" ]; then
   echo "$ok/$total binaries boot and answer from a clean clone of HEAD; $failed failing, $no_smoke with no smoke to run ($(( finished_epoch - start_epoch ))s)"
+elif [ "$MODE" = "node" ]; then
+  echo "$ok/$total node packages install and build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 else
   echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 fi

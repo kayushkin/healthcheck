@@ -203,6 +203,28 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-smoke-status.sh"]
     expect_output: "ok"
 
+  # The other half of tier 1. repo-build-guard walks go.mod and stops there, so
+  # every TypeScript tree in the fleet was unguarded — and they are a MORE likely
+  # home for this bug class than the Go repos, not less, because `file:../sibling`
+  # links a package through its BUILD ARTIFACT rather than compiling it from
+  # source. If that artifact is gitignored and nothing rebuilds it, the consumer
+  # builds only where a stale copy happens to be lying around.
+  #
+  # That is not hypothetical: kayushkin.com could not be built from its committed
+  # source, because miditab (linked file:) shipped no way to produce its own entry
+  # point. deploy.sh commits the bundle and the server serves it, so the live
+  # site's frontend was reproducible on exactly one machine on earth.
+  #
+  # Also asserts something the Go pass has no equivalent for: bridge-ui, dash,
+  # llmux and kayushkin.com all COMMIT their build output and serve it directly,
+  # so a bundle that no longer matches its source is stale JavaScript shipped to
+  # real users from a tree whose git status is clean. After building the committed
+  # source in a pristine clone, the clone must still be pristine.
+  - name: repo-node-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-node-status.sh"]
+    expect_output: "ok"
+
   # System (non-user) units
   - name: llm-bridge
     type: systemd
