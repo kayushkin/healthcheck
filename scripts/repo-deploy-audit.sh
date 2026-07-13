@@ -274,9 +274,15 @@ for repo_path in "$REPOS_DIR"/*; do
   tracked="$(printf '%s\n' "$porcelain" | grep -vc '^??' || true)"
   untracked="$(printf '%s\n' "$porcelain" | grep -c '^??' || true)"
 
+  # Freshness is judged from TRACKED files only. An untracked build artifact is
+  # touched by every build, so letting it vote would let a `go build` mask
+  # abandoned work indefinitely — which it did: scheduler's deploy rebuilt an
+  # untracked `ask` binary, whose fresh mtime hid a 32-day-old modified
+  # logging.go on this guard's very first run.
   newest=0
   while IFS= read -r line; do
     [ -z "$line" ] && continue
+    case "$line" in '??'*) continue ;; esac
     f="${line:3}"
     f="${f##* -> }"   # rename entries: "R  old -> new"
     p="$repo_path/$f"
