@@ -225,6 +225,38 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-node-status.sh"]
     expect_output: "ok"
 
+  # Tier 3: does the RUNNING binary match the COMMITTED source?
+  #
+  # The three guards above all interrogate the committed tree — does it compile,
+  # does it boot, does its bundle match its source. Not one of them ever looks at
+  # the process actually serving traffic, and that blind spot is total: a stale
+  # service is up, answers, and passes every health check. It just isn't running
+  # your code.
+  #
+  # Found the hard way on 2026-07-13. llm-bridge-server was serving a Jun-15
+  # binary, 14 commits behind HEAD — including the fix for the bug being
+  # investigated at the time. The cause chains through the other guards: a
+  # .gitignore glob (credentials.*) swallowed internal/harness/credentials.go, so
+  # the COMMITTED tree stopped compiling, so HEAD could not be deployed, so a
+  # month of commits piled up. repo-build-guard eventually caught the unbuildable
+  # tree — but once that was fixed, nothing noticed the running process was still
+  # a month stale. Compiling and booting were guarded. Shipping never was.
+  #
+  # Identifies each artifact by the module path and git revision Go stamps into
+  # it (go version -m), never by filename. Filenames lie on this host in both
+  # directions: llm-bridge-server/ deploys a binary named `llm-bridge`, while
+  # ~/bin/llm-bridge-server is a dead Apr-13 leftover nothing runs. A
+  # filename-based audit reads the leftover and reports 176 commits behind,
+  # sending you after a binary that has not served a request in three months.
+  #
+  # Also flags the other direction of the same drift: uncommitted tracked changes
+  # in a repo that no ACTIVE bridge session is working in — work abandoned
+  # mid-flight, which the next agent will silently conflict with.
+  - name: repo-deploy-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-deploy-status.sh"]
+    expect_output: "ok"
+
   # System (non-user) units
   - name: llm-bridge
     type: systemd
