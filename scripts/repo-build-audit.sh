@@ -225,6 +225,57 @@ smoke_status() {
   esac
 }
 
+# check_port_collisions — no two smokes may declare the same default port.
+#
+# Smokes run SERIALLY, and for a long time that was taken to mean sharing a port
+# was harmless. It is not. `kill` + `wait` reaps the process, but the kernel does
+# not hand the listening socket back instantly — so the next smoke to bind the
+# SAME number can lose the race and die with "address already in use". The result
+# is a guard that fails a repo whose tree is perfectly fine, intermittently, at
+# 03:30, which is precisely the kind of red that people learn to ignore.
+#
+# It happened: three separate batches of smokes were written months apart, each
+# author picking port numbers from a hand-maintained list in a note, and the list
+# went stale. Nine repos ended up sharing five ports before anything went red.
+#
+# So the registry is DERIVED from the smokes themselves rather than maintained by
+# hand — the same reason the guard discovers smokes by convention instead of from
+# a service list. A note can drift from reality; this cannot. Any two smokes that
+# claim one port is a hard failure of the guard, reported before a single smoke
+# runs, because the alternative is a flake that looks like a real regression.
+#
+# Read from HEAD, not the working tree, for the same reason everything else here
+# is: the guard clones HEAD and runs THAT. A port fix sitting uncommitted on
+# someone's disk would make this check pass while the clones still collide —
+# the check would be guarding a file that never runs.
+#
+# Matches the established shape: `VAR="${E2E_SOMETHING:-19123}"`.
+check_port_collisions() {
+  local path name dupes
+  dupes=$(
+    for path in "$REPOS_DIR"/*/; do
+      name=$(basename "$path")
+      git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
+      git -C "$path" show HEAD:scripts/e2e-smoke.sh 2>/dev/null |
+        grep -oE '^[A-Z_]+="\$\{E2E_[A-Z_]+:-[0-9]{4,5}\}"' |
+        while IFS= read -r line; do
+          printf '%s\t%s(%s)\n' "$(expr "$line" : '.*:-\([0-9]*\)}')" "$name" "${line%%=*}"
+        done
+    done | sort -n | awk -F'\t' '
+      { owners[$1] = owners[$1] $2 " "; n[$1]++ }
+      END { for (p in n) if (n[p] > 1) printf "  port %s claimed by: %s\n", p, owners[p] }
+    ' | sort
+  )
+  [ -z "$dupes" ] && return 0
+  echo "FAIL: two or more smokes declare the same default port." >&2
+  echo "$dupes" >&2
+  echo "" >&2
+  echo "Smokes run serially, but a killed server does not release its listening" >&2
+  echo "socket instantly — a shared port makes the guard fail intermittently on a" >&2
+  echo "repo whose tree is fine. Give each smoke its own number." >&2
+  return 1
+}
+
 # run_smoke <repo_dir> <scratch> — run the repo's own smoke from the clean clone.
 #
 # HOME points at a scratch directory that is thrown away afterwards. Every
@@ -252,6 +303,12 @@ run_smoke() {
       ./scripts/e2e-smoke.sh 2>&1)
   return $?
 }
+
+# Fail fast, before any smoke boots: two smokes on one port make the guard flaky,
+# and a flaky guard is worse than no guard. See check_port_collisions.
+if [ "$MODE" = "smoke" ] && ! check_port_collisions; then
+  exit 1
+fi
 
 results=()   # name<TAB>status<TAB>stage<TAB>seconds<TAB>detail
 total=0; ok=0; failed=0; unguarded=0
