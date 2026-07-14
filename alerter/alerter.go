@@ -188,23 +188,28 @@ func (a *Alerter) createEscalationSession(name string, state checker.ResourceSta
 		return
 	}
 
+	// session_id is what llm-bridge-server returns; "bridge_id" is a field that
+	// exists nowhere in that server. Decoding it always yielded "", so this
+	// escalation bailed out below before ever sending its prompt — creating an
+	// abandoned Claude Code session, holding ~300MB, told nothing. Same defect
+	// as the resource path in checker/resource.go.
 	var session struct {
-		BridgeID    string `json:"bridge_id"`
+		SessionID   string `json:"session_id"`
 		DisplayName string `json:"display_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		log.Printf("LLMUX-ESCALATION: decode session response: %v", err)
 		return
 	}
-	if session.BridgeID == "" {
-		log.Printf("LLMUX-ESCALATION: empty bridge_id in response")
+	if session.SessionID == "" {
+		log.Printf("LLMUX-ESCALATION: server returned no session_id; nothing to send the prompt to")
 		return
 	}
 
 	sendBody, _ := json.Marshal(map[string]string{"message": prompt})
-	sendResp, err := client.Post(a.llmBridgeURL+"/sessions/"+session.BridgeID+"/send", "application/json", bytes.NewReader(sendBody))
+	sendResp, err := client.Post(a.llmBridgeURL+"/sessions/"+session.SessionID+"/send", "application/json", bytes.NewReader(sendBody))
 	if err != nil {
-		log.Printf("LLMUX-ESCALATION: send message to %s failed: %v", session.BridgeID, err)
+		log.Printf("LLMUX-ESCALATION: send message to %s failed: %v", session.SessionID, err)
 		return
 	}
 	defer sendResp.Body.Close()
@@ -214,7 +219,7 @@ func (a *Alerter) createEscalationSession(name string, state checker.ResourceSta
 		return
 	}
 
-	log.Printf("LLMUX-ESCALATION: created session %s (%q) for %s", session.BridgeID, session.DisplayName, name)
+	log.Printf("LLMUX-ESCALATION: created session %s (%q) for %s", session.SessionID, session.DisplayName, name)
 }
 
 func (a *Alerter) OnRestart(name string, success bool, err error) {

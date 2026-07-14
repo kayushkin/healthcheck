@@ -16,19 +16,35 @@ import (
 )
 
 type ResourceState struct {
-	Name             string    `json:"name"`
-	Type             string    `json:"type"`
-	Status           Status    `json:"status"`
-	UsagePct         float64   `json:"usage_pct"`
-	Threshold        float64   `json:"threshold"`
-	Detail           string    `json:"detail"`
-	LastCheck        time.Time `json:"last_check"`
-	ConsecutiveFails int       `json:"consecutive_failures"`
-	LastError        string    `json:"last_error,omitempty"`
-	LastAlertAt      time.Time `json:"last_alert_at,omitempty"`
-	LastCCAgentAt    time.Time `json:"last_cc_agent_at,omitempty"`
-	CCAgentAttempts  int       `json:"cc_agent_attempts,omitempty"`
-	CCAgentGaveUp    bool      `json:"cc_agent_gave_up,omitempty"`
+	Name      string  `json:"name"`
+	Type      string  `json:"type"`
+	Status    Status  `json:"status"`
+	UsagePct  float64 `json:"usage_pct"`
+	Threshold float64 `json:"threshold"`
+	// ThresholdBreached records that the LAST check actually measured usage
+	// at or above the threshold — as opposed to failing to measure at all.
+	// The two are not the same thing and must not be conflated: a check that
+	// errors leaves UsagePct holding a stale reading from the last successful
+	// run, so a resource that is perfectly healthy can sit in StatusDown with
+	// a reassuring number next to it.
+	//
+	// That is exactly what happened on 2026-07-13: memory pressure made the
+	// disk check time out, disk-root went StatusDown, and healthcheck spawned
+	// six remediation agents for a disk that was 25% full — each one logging
+	// the flatly false "spawning bridge session for disk-root alert (25.0% >=
+	// 90.0%)", and each one a fresh Claude Code process on a box that was
+	// already dying of memory exhaustion. Remediation is gated on this field,
+	// never on Status, so we only ever send an agent after a real measurement
+	// that really exceeded the threshold.
+	ThresholdBreached bool      `json:"threshold_breached,omitempty"`
+	Detail            string    `json:"detail"`
+	LastCheck         time.Time `json:"last_check"`
+	ConsecutiveFails  int       `json:"consecutive_failures"`
+	LastError         string    `json:"last_error,omitempty"`
+	LastAlertAt       time.Time `json:"last_alert_at,omitempty"`
+	LastCCAgentAt     time.Time `json:"last_cc_agent_at,omitempty"`
+	CCAgentAttempts   int       `json:"cc_agent_attempts,omitempty"`
+	CCAgentGaveUp     bool      `json:"cc_agent_gave_up,omitempty"`
 }
 
 const (
@@ -79,14 +95,19 @@ func (c *Checker) checkResource(res ResourceConfig) {
 	state.LastCheck = time.Now()
 
 	if checkErr != nil {
+		// We failed to MEASURE. That is a broken check, not a breached
+		// threshold — UsagePct still holds the last good reading and says
+		// nothing about right now, so we must not let it look like a breach.
 		state.ConsecutiveFails++
 		state.LastError = checkErr.Error()
 		state.Status = StatusDown
+		state.ThresholdBreached = false
 	} else {
 		state.UsagePct = usagePct
 		state.Detail = detail
 		if usagePct >= res.Threshold {
 			state.ConsecutiveFails++
+			state.ThresholdBreached = true
 			state.LastError = fmt.Sprintf("usage %.1f%% exceeds threshold %.1f%%", usagePct, res.Threshold)
 			if state.ConsecutiveFails >= c.config.AlertThreshold {
 				state.Status = StatusDown
@@ -95,6 +116,7 @@ func (c *Checker) checkResource(res ResourceConfig) {
 			}
 		} else {
 			state.ConsecutiveFails = 0
+			state.ThresholdBreached = false
 			state.Status = StatusUp
 			state.LastError = ""
 		}
@@ -113,7 +135,11 @@ func (c *Checker) checkResource(res ResourceConfig) {
 		} else if state.LastAlertAt.IsZero() {
 			state.LastAlertAt = now
 		}
-		if res.CCAgent && (state.LastCCAgentAt.IsZero() || now.Sub(state.LastCCAgentAt) >= ccAgentCooldown) {
+		// Gated on ThresholdBreached, NOT on Status: a check that merely failed
+		// to run has nothing for an agent to remediate, and spawning one costs
+		// a whole Claude Code process — the last thing a resource-starved box
+		// needs. See ResourceState.ThresholdBreached.
+		if res.CCAgent && state.ThresholdBreached && (state.LastCCAgentAt.IsZero() || now.Sub(state.LastCCAgentAt) >= ccAgentCooldown) {
 			if state.CCAgentAttempts < maxCCAgentAttempts {
 				state.LastCCAgentAt = now
 				state.CCAgentAttempts++
@@ -280,22 +306,29 @@ func (c *Checker) spawnCCAgent(res ResourceConfig, state *ResourceState) {
 		return
 	}
 
+	// session_id is what llm-bridge-server returns. It used to be decoded as
+	// "bridge_id", a field that does not exist anywhere in that server — so
+	// this always read back empty, logged "empty bridge_id", and returned
+	// BELOW, before ever sending the prompt. Every memory alert from 2026-07-12
+	// onward therefore spawned a Claude Code session, failed to learn its id,
+	// and abandoned it with no instructions: ~300MB leaked per alert and zero
+	// remediation performed, while the host OOM'd.
 	var session struct {
-		BridgeID string `json:"bridge_id"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		log.Printf("CC-AGENT: decode session response for %s: %v", res.Name, err)
 		return
 	}
-	if session.BridgeID == "" {
-		log.Printf("CC-AGENT: empty bridge_id for %s", res.Name)
+	if session.SessionID == "" {
+		log.Printf("CC-AGENT: server returned no session_id for %s; nothing to send the prompt to", res.Name)
 		return
 	}
 
 	sendBody, _ := json.Marshal(map[string]string{"message": prompt})
-	sendResp, err := client.Post(bridgeURL+"/sessions/"+session.BridgeID+"/send", "application/json", bytes.NewReader(sendBody))
+	sendResp, err := client.Post(bridgeURL+"/sessions/"+session.SessionID+"/send", "application/json", bytes.NewReader(sendBody))
 	if err != nil {
-		log.Printf("CC-AGENT: send message to %s failed: %v", session.BridgeID, err)
+		log.Printf("CC-AGENT: send message to %s failed: %v", session.SessionID, err)
 		return
 	}
 	defer sendResp.Body.Close()
@@ -304,5 +337,5 @@ func (c *Checker) spawnCCAgent(res ResourceConfig, state *ResourceState) {
 		log.Printf("CC-AGENT: send message returned %d for %s: %s", sendResp.StatusCode, res.Name, string(body))
 		return
 	}
-	log.Printf("CC-AGENT: started session %s for %s", session.BridgeID, res.Name)
+	log.Printf("CC-AGENT: started session %s for %s", session.SessionID, res.Name)
 }
