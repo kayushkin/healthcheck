@@ -1,2 +1,6 @@
 healthcheck
 *.log
+
+# inber agent-session runtime state (session/memory DBs + materialized workspace);
+# never source. Matches the canonical inber repo, which gitignores .inber/.
+.inber/
