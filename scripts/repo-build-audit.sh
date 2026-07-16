@@ -97,8 +97,37 @@
 # The build is deterministic (verified: byte-identical across runs, and the
 # committed hashes match), so any diff is real drift.
 #
-# Consumed by scripts/repo-build-audit-status.sh, scripts/repo-smoke-status.sh and
-# scripts/repo-node-status.sh, which healthcheck polls.
+# Hygiene: --elf
+# --------------
+# Everything above asks whether the committed source is CORRECT. --elf asks a
+# cheaper, orthogonal question: is a compiled BINARY committed into a source repo
+# in the first place?
+#
+# On 2026-07-16 a `git ls-files | grep ELF` sweep of ~/repos found committed
+# multi-MB Go build-artifact binaries in NINE repos — pure weight in every clone,
+# and worse, they READ AS SOURCE: an agent grepping the tree trips over a 12 MB
+# blob, and a `git rm --cached`-able dropping quietly bloats every checkout. In
+# every case the live service runs its own `~/bin/<name>` artifact (deploy.sh
+# builds to a temp path), so the repo-root binary is a stale dropping, never
+# load-bearing. Seven were untracked by hand that night; the sweep was a human
+# walking ~/repos with a pipeline, which is exactly the kind of thing that stops
+# happening the moment nobody remembers to.
+#
+# So --elf DERIVES the finding from HEAD every night instead. For every git repo
+# under ~/repos it reads each blob committed at HEAD (never the working tree — a
+# binary staged only on someone's disk is not what a clone carries, and one
+# `git rm`-ed from the tree but left on disk must not read as still-committed) and
+# flags any whose first four bytes are the ELF magic \x7fELF. No allowlist: a repo
+# that legitimately needs a committed binary is a real decision to make out loud
+# when it happens, not a line to pre-bless here — same reason the port registry is
+# derived from HEAD and never hand-maintained.
+#
+# It reads HEAD via `git cat-file --batch` (one process per repo, not per blob),
+# so it needs no toolchain at all — not go, not node.
+#
+# Consumed by scripts/repo-build-audit-status.sh, scripts/repo-smoke-status.sh,
+# scripts/repo-node-status.sh and scripts/repo-elf-status.sh, which healthcheck
+# polls.
 
 set -uo pipefail
 
@@ -116,6 +145,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) MODE=smoke ;;
     --node) MODE=node ;;
+    --elf) MODE=elf ;;
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
@@ -136,6 +166,7 @@ done
 case "$MODE" in
   smoke) REPORT="${REPORT:-$STATE_DIR/smoke-report.json}" ;;
   node)  REPORT="${REPORT:-$STATE_DIR/node-report.json}" ;;
+  elf)   REPORT="${REPORT:-$STATE_DIR/elf-report.json}" ;;
   *)     REPORT="${REPORT:-$STATE_DIR/report.json}" ;;
 esac
 
@@ -174,12 +205,13 @@ if [ -x "$MISE_BIN" ]; then
     [ -n "$real" ] && export PATH="$(dirname "$real"):$PATH"
   done
 fi
+# --elf reads committed blobs with git alone, so it needs no language toolchain.
 if [ "$MODE" = "node" ]; then
   if ! command -v npm >/dev/null 2>&1; then
     echo "FATAL: npm is not on PATH — cannot audit anything" >&2
     exit 2
   fi
-elif ! command -v go >/dev/null 2>&1; then
+elif [ "$MODE" != "elf" ] && ! command -v go >/dev/null 2>&1; then
   echo "FATAL: go is not on PATH — cannot audit anything" >&2
   exit 2
 fi
@@ -646,10 +678,94 @@ if [ "$MODE" = "node" ]; then
   done < <(list_node_packages)
 fi
 
-# The Go sweep. Skipped wholesale in --node mode, which walks package.json
-# instead of go.mod and has already filled in results/counters above.
+# The ELF hygiene sweep. Walks every git repo under ~/repos and flags any that
+# committed an ELF binary at HEAD. Reads blobs straight out of git — no clone, no
+# toolchain — so it is cheap enough to scan the whole fleet in one pass. Fills in
+# results/counters like the node block, then the Go sweep is skipped below.
+if [ "$MODE" = "elf" ]; then
+  for path in "$REPOS_DIR"/*/; do
+    name=$(basename "$path")
+    [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+    total=$((total + 1))
+
+    if ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
+      # No committed HEAD, so there is nothing to scan. Report it rather than
+      # passing it silently — the same call the Go and node passes make.
+      unguarded=$((unguarded + 1))
+      results+=("$name	unguarded	-	0	not a git repo — no committed HEAD to scan for binaries")
+      echo "UNGUARDED $name (not a git repo)"
+      continue
+    fi
+
+    repo_start=$(date +%s)
+    # Each hit is "<path>\t<bytes>". One `git cat-file --batch` per repo, fed the
+    # hash of every blob at HEAD, reading only enough of each to test the magic.
+    hits=$(REPO="$path" python3 -c '
+import os, subprocess, sys
+ELF = b"\x7fELF"
+repo = os.environ["REPO"]
+ls = subprocess.run(["git", "-C", repo, "ls-tree", "-r", "HEAD"],
+                    capture_output=True)
+if ls.returncode != 0:
+    sys.exit(0)
+entries = []  # (blob_hash, path)
+for line in ls.stdout.decode("utf-8", "surrogateescape").splitlines():
+    meta, _, fpath = line.partition("\t")
+    parts = meta.split()
+    if len(parts) < 3 or parts[1] != "blob":
+        continue
+    entries.append((parts[2], fpath))
+if not entries:
+    sys.exit(0)
+proc = subprocess.Popen(["git", "-C", repo, "cat-file", "--batch"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+req = b"".join((h + "\n").encode() for h, _ in entries)
+out = proc.communicate(req)[0]
+i = 0
+for _, fpath in entries:
+    nl = out.index(b"\n", i)
+    header = out[i:nl].split()
+    i = nl + 1
+    # A blob header is "<hash> blob <size>"; anything else (a missing object)
+    # has no content section to skip. HEAD hashes always resolve, but be safe.
+    if len(header) < 3:
+        continue
+    size = int(header[2])
+    content = out[i:i + size]
+    i += size + 1  # trailing newline after the content
+    if content[:4] == ELF:
+        print("%s\t%d" % (fpath, size))
+')
+    secs=$(( $(date +%s) - repo_start ))
+
+    if [ -z "$hits" ]; then
+      ok=$((ok + 1))
+      results+=("$name	ok	-	$secs	")
+      echo "OK        $name (${secs}s)"
+    else
+      failed=$((failed + 1))
+      # Format each hit as "path (X.XMB)" and join with "; " for the report line.
+      detail=$(echo "$hits" | python3 -c '
+import sys
+parts = []
+for line in sys.stdin.read().splitlines():
+    if not line.strip():
+        continue
+    fpath, _, size = line.partition("\t")
+    mb = int(size) / 1e6 if size.isdigit() else 0
+    parts.append("%s (%.1fMB)" % (fpath, mb))
+print("; ".join(parts))
+')
+      results+=("$name	fail	elf	$secs	committed ELF binaries: $detail")
+      echo "FAIL      $name — committed ELF binaries: $detail"
+    fi
+  done
+fi
+
+# The Go sweep. Skipped wholesale in --node and --elf modes, which walk their own
+# targets instead of go.mod and have already filled in results/counters above.
 repo_dirs=()
-[ "$MODE" != "node" ] && repo_dirs=("$REPOS_DIR"/*/)
+[ "$MODE" != "node" ] && [ "$MODE" != "elf" ] && repo_dirs=("$REPOS_DIR"/*/)
 
 for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   name=$(basename "$path")
@@ -851,8 +967,9 @@ else:
         report["node_version"] = os.environ["NODE_VERSION"]
         report["packages_total"] = int(os.environ["TOTAL"])
         report["unguarded_packages"] = [r["repo"] for r in rows if r["status"] == "unguarded"]
-    else:
+    elif mode == "build":
         report["with_tests"] = os.environ["WITH_TESTS"] == "1"
+    # elf carries no extra keys: it neither runs tests nor a toolchain.
     report["unguarded"] = int(os.environ["UNGUARDED"])
 with open(os.environ["REPORT"], "w") as fh:
     json.dump(report, fh, indent=2)
@@ -864,6 +981,8 @@ if [ "$MODE" = "smoke" ]; then
   echo "$ok/$total binaries boot and answer from a clean clone of HEAD; $failed failing, $no_smoke with no smoke to run ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "node" ]; then
   echo "$ok/$total node packages install and build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+elif [ "$MODE" = "elf" ]; then
+  echo "$ok/$total repos carry no committed ELF binary at HEAD; $failed with committed binaries, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 else
   echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 fi
