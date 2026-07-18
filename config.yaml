@@ -257,6 +257,25 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-deploy-status.sh"]
     expect_output: "ok"
 
+  # Tier 1, a fourth axis: has a repo committed a compiled binary into its own
+  # source tree? A committed multi-MB ELF is pure weight in every clone and reads
+  # as source to anyone (human or agent) grepping the tree, while the live service
+  # runs its own ~/bin artifact — so the committed blob is a stale dropping that
+  # nobody notices until it is a habit. On 2026-07-16 a hand sweep of ~/repos
+  # found nine repos had each accumulated one, and the sweep itself had to be done
+  # by a human walking the tree because nothing watched for it.
+  #
+  # Same shape as the guards above: the fleet-wide HEAD scan runs nightly under
+  # the scheduler (repo-elf-guard job) and leaves its verdict in elf-report.json;
+  # this check only reads that verdict. There is deliberately NO allowlist — a repo
+  # that genuinely must commit a binary is a decision to make out loud when it
+  # happens, not a line pre-blessed here. STALE fails as loudly as a finding: a
+  # guard that quietly stopped running looks exactly like one that is passing.
+  - name: repo-elf-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-elf-status.sh"]
+    expect_output: "ok"
+
   # System (non-user) units
   - name: llm-bridge
     type: systemd
