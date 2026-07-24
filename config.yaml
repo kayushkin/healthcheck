@@ -99,6 +99,11 @@ services:
     unit: kanban-store
     auto_restart: true
 
+  - name: producer
+    type: systemd
+    unit: producer
+    auto_restart: true
+
   - name: multichat-server
     type: systemd
     unit: multichat-server
