@@ -27,6 +27,21 @@ const (
 	StatusMisconfigured Status = "misconfigured"
 )
 
+// maxConsecutiveAutoRestarts bounds auto_restart. A unit that has been restarted
+// this many times without once reporting healthy in between is not going to be
+// fixed by restarting it again: something outside the unit is wrong — the check
+// names the wrong unit, or another process holds the port it needs. Restarting
+// forever hides that. It spends a systemctl call every check interval, and it
+// buries the one line that says what is actually broken under thousands of
+// identical retries.
+//
+// This is the same failure the StatusMisconfigured path already guards, one step
+// further along: there the unit does not exist, here it exists and can never
+// start. healthcheck drove 811,295 restarts of a kayushkin.service whose port was
+// permanently held by its own mirror unit; the mirror later inherited the loop and
+// reached 167,074. Both were unbounded for the same reason — nothing counted.
+const maxConsecutiveAutoRestarts = 5
+
 // UnitNotFoundError reports that a systemd check names a unit that does not
 // exist under the manager it probed — i.e. `system_unit` disagrees with where
 // the unit actually lives, or the unit is gone. This is a config bug, not a
@@ -59,6 +74,34 @@ type ServiceState struct {
 	VersionDrift      int       `json:"version_drift,omitempty"`
 	LastError         string    `json:"last_error,omitempty"`
 	EnabledState      string    `json:"enabled_state,omitempty"` // systemctl is-enabled output (only set for type=systemd)
+	// RestartAttempts counts auto_restart attempts since the service last
+	// reported healthy. RestartSuppressed means that count hit
+	// maxConsecutiveAutoRestarts and healthcheck has stopped trying, so a
+	// permanently-red service is visibly distinct from one still being retried.
+	RestartAttempts   int  `json:"restart_attempts,omitempty"`
+	RestartSuppressed bool `json:"restart_suppressed,omitempty"`
+}
+
+// authorizeAutoRestart spends one attempt from the service's auto_restart budget
+// and reports what the caller should do. allowed means fire a restart;
+// suppressedNow means the budget just ran out and the caller should log that once
+// — on every later call both are false, which is what keeps a permanently-broken
+// unit from writing a line per check interval forever.
+//
+// The counter lives on the state, not in the restart goroutine, so that a restart
+// which returns success but leaves the unit dead still costs an attempt: the
+// budget asks "has this service come back?", not "did systemctl exit 0?".
+func (s *ServiceState) authorizeAutoRestart(max int) (allowed, suppressedNow bool) {
+	switch {
+	case s.RestartSuppressed:
+		return false, false
+	case s.RestartAttempts >= max:
+		s.RestartSuppressed = true
+		return false, true
+	default:
+		s.RestartAttempts++
+		return true, false
+	}
 }
 
 type uptimeRecord struct {
@@ -208,8 +251,22 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		state.ConsecutiveFails = 0
 		state.Status = StatusUp
 		state.LastError = ""
+		// It answered, so whatever was wrong is over. Re-arm auto_restart for the
+		// next outage — the budget bounds one continuous failure, not the
+		// service's lifetime.
+		state.RestartAttempts = 0
+		state.RestartSuppressed = false
 	}
 	consecutiveFails := state.ConsecutiveFails
+
+	// Decide about auto_restart here, while the lock is still held, so two
+	// concurrent checks of the same service cannot both spend the same attempt
+	// and slip past the bound.
+	restartAllowed, restartSuppressedNow := false, false
+	if svc.AutoRestart && svc.Type == "systemd" && !misconfigured &&
+		checkErr != nil && consecutiveFails >= c.config.AlertThreshold {
+		restartAllowed, restartSuppressedNow = state.authorizeAutoRestart(maxConsecutiveAutoRestarts)
+	}
 
 	// Record uptime history
 	c.history[svc.Name] = append(c.history[svc.Name], uptimeRecord{
@@ -240,7 +297,18 @@ func (c *Checker) checkService(svc ServiceConfig) {
 			svc.Name, checkErr)
 	} else if checkErr != nil && consecutiveFails >= c.config.AlertThreshold {
 		if svc.AutoRestart && svc.Type == "systemd" {
-			go c.restartService(svc)
+			if restartSuppressedNow {
+				log.Printf("RESTART SUPPRESSED %s (unit=%s system=%v): %d consecutive "+
+					"auto-restarts did not bring it up, so healthcheck has stopped "+
+					"restarting it and will resume only once it reports healthy. "+
+					"Something outside the unit is wrong — check that the unit name and "+
+					"system_unit are right and that nothing else holds its port. "+
+					"Last error: %v",
+					svc.Name, svc.Unit, svc.SystemUnit, maxConsecutiveAutoRestarts, checkErr)
+			}
+			if restartAllowed {
+				go c.restartService(svc)
+			}
 		} else if len(svc.RecoveryCommand) > 0 {
 			go c.runRecovery(svc)
 		}

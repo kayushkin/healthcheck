@@ -124,3 +124,77 @@ func TestCheckSystemdReportsRealRunningUnit(t *testing.T) {
 		t.Fatal("unreachable")
 	}
 }
+
+// TestAutoRestartIsBounded pins the second half of the crash-loop class. The
+// misconfigured guard above only catches a unit that does not exist. A unit that
+// exists, loads, and can never start — because another process holds its port —
+// stays StatusDown forever, and auto_restart used to fire on every single check
+// interval against it: 1,325 futile `systemctl restart` calls in 24h on this
+// host, indefinitely.
+//
+// The budget is asserted directly on the state rather than by counting restarts
+// over a wall-clock window, so the test cannot go flaky under load.
+func TestAutoRestartIsBounded(t *testing.T) {
+	state := &ServiceState{Name: "stuck", Type: "systemd", Status: StatusDown}
+
+	attempts, suppressions := 0, 0
+	// Far more rounds than the budget: the historical bug was not one restart too
+	// many, it was that the retries never stopped.
+	for i := 0; i < maxConsecutiveAutoRestarts*20; i++ {
+		allowed, suppressedNow := state.authorizeAutoRestart(maxConsecutiveAutoRestarts)
+		if allowed {
+			attempts++
+		}
+		if suppressedNow {
+			suppressions++
+		}
+	}
+
+	if attempts != maxConsecutiveAutoRestarts {
+		t.Errorf("auto_restart fired %d times, want exactly %d — an unbounded retry "+
+			"against a unit that can never start is the 811k/167k-restart crash loop",
+			attempts, maxConsecutiveAutoRestarts)
+	}
+	// Exactly one, or the suppression notice becomes the new per-interval spam.
+	if suppressions != 1 {
+		t.Errorf("suppression reported %d times, want exactly 1 — logging it on every "+
+			"later check would just replace one unbounded log stream with another",
+			suppressions)
+	}
+	if !state.RestartSuppressed {
+		t.Error("state must record RestartSuppressed so a given-up service is visibly " +
+			"distinct in /api/status from one still being retried")
+	}
+}
+
+// TestAutoRestartBudgetRearmsAfterRecovery guards the opposite direction: the
+// budget bounds a single continuous outage, not the service's whole lifetime. A
+// service that failed, was restarted, came back, and later fails again must get a
+// full budget the second time — otherwise auto_restart silently stops working for
+// every service that has ever flapped.
+func TestAutoRestartBudgetRearmsAfterRecovery(t *testing.T) {
+	userManagerReachable(t)
+
+	c := New(&Config{AlertThreshold: 1})
+	svc := ServiceConfig{Name: "noteboard", Type: "systemd", Unit: "noteboard", AutoRestart: true}
+	if err := c.checkSystemd(svc); err != nil {
+		t.Skipf("noteboard not running locally, cannot drive a real recovery: %v", err)
+	}
+
+	c.states[svc.Name] = &ServiceState{
+		Name: svc.Name, Type: svc.Type, Status: StatusDown,
+		RestartAttempts: maxConsecutiveAutoRestarts, RestartSuppressed: true,
+	}
+
+	// A healthy check must clear the exhausted budget.
+	c.checkService(svc)
+
+	state := c.states[svc.Name]
+	if state.Status != StatusUp {
+		t.Fatalf("expected the live noteboard unit to check out up, got %q", state.Status)
+	}
+	if state.RestartSuppressed || state.RestartAttempts != 0 {
+		t.Errorf("a service that reported healthy must get its auto_restart budget back, "+
+			"got attempts=%d suppressed=%v", state.RestartAttempts, state.RestartSuppressed)
+	}
+}
