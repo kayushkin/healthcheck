@@ -42,6 +42,22 @@ const (
 // reached 167,074. Both were unbounded for the same reason — nothing counted.
 const maxConsecutiveAutoRestarts = 5
 
+// minHealthyChecksToRearmAutoRestart is how many consecutive healthy checks a
+// service must pass before its auto_restart budget refills.
+//
+// One is not enough, and the kayushkin loop is why. A unit with the default
+// Type=simple counts as "active" from the instant systemd forks it, so a unit
+// that starts, fails to bind a port and exits still spends a fraction of every
+// restart cycle reporting active. A single probe landing in that window looks
+// exactly like recovery. Refilling on it handed a permanently-broken unit a fresh
+// budget roughly once an hour — measured: one such probe at 20:53 bought five more
+// futile restarts between 20:56 and 21:00.
+//
+// Requiring the service to still be healthy at the next check costs one interval
+// of delay after a genuine recovery, and cuts the odds of a flapping unit
+// refilling its budget to the square of a single window.
+const minHealthyChecksToRearmAutoRestart = 2
+
 // UnitNotFoundError reports that a systemd check names a unit that does not
 // exist under the manager it probed — i.e. `system_unit` disagrees with where
 // the unit actually lives, or the unit is gone. This is a config bug, not a
@@ -75,11 +91,15 @@ type ServiceState struct {
 	LastError         string    `json:"last_error,omitempty"`
 	EnabledState      string    `json:"enabled_state,omitempty"` // systemctl is-enabled output (only set for type=systemd)
 	// RestartAttempts counts auto_restart attempts since the service last
-	// reported healthy. RestartSuppressed means that count hit
+	// recovered. RestartSuppressed means that count hit
 	// maxConsecutiveAutoRestarts and healthcheck has stopped trying, so a
 	// permanently-red service is visibly distinct from one still being retried.
+	// ConsecutiveOKs counts healthy checks in a row; the budget refills only once
+	// it reaches minHealthyChecksToRearmAutoRestart, so a unit that merely blips
+	// "active" mid-restart-loop cannot refill it.
 	RestartAttempts   int  `json:"restart_attempts,omitempty"`
 	RestartSuppressed bool `json:"restart_suppressed,omitempty"`
+	ConsecutiveOKs    int  `json:"consecutive_oks,omitempty"`
 }
 
 // authorizeAutoRestart spends one attempt from the service's auto_restart budget
@@ -238,6 +258,7 @@ func (c *Checker) checkService(svc ServiceConfig) {
 
 	if checkErr != nil {
 		state.ConsecutiveFails++
+		state.ConsecutiveOKs = 0
 		state.LastError = checkErr.Error()
 		switch {
 		case misconfigured:
@@ -251,11 +272,17 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		state.ConsecutiveFails = 0
 		state.Status = StatusUp
 		state.LastError = ""
-		// It answered, so whatever was wrong is over. Re-arm auto_restart for the
-		// next outage — the budget bounds one continuous failure, not the
-		// service's lifetime.
-		state.RestartAttempts = 0
-		state.RestartSuppressed = false
+		state.ConsecutiveOKs++
+		// Refill the auto_restart budget only once the service has held up across
+		// consecutive checks. The budget bounds one continuous outage rather than
+		// the service's lifetime — but a unit stuck in a restart loop reports
+		// "active" for the instant between fork and failure, and treating one such
+		// probe as recovery let a permanently-broken unit refill its budget about
+		// once an hour.
+		if state.ConsecutiveOKs >= minHealthyChecksToRearmAutoRestart {
+			state.RestartAttempts = 0
+			state.RestartSuppressed = false
+		}
 	}
 	consecutiveFails := state.ConsecutiveFails
 

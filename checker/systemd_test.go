@@ -167,6 +167,66 @@ func TestAutoRestartIsBounded(t *testing.T) {
 	}
 }
 
+// TestFlappingUnitCannotRefillItsRestartBudget pins the hole the first version of
+// the budget left open, found by watching the real check for an hour rather than
+// for three minutes.
+//
+// A unit with the default Type=simple counts as "active" from the instant systemd
+// forks it, so one stuck in a bind-fail restart loop reports active for a fraction
+// of every cycle. A single probe landing in that window looks like recovery. When
+// one healthy check was enough to refill the budget, that happened about once an
+// hour and bought five more futile restarts each time — the loop was throttled,
+// not stopped. Recovery must mean the service is still there at the next check.
+func TestFlappingUnitCannotRefillItsRestartBudget(t *testing.T) {
+	state := &ServiceState{Name: "flapper", Type: "systemd", Status: StatusDown}
+
+	spend := func() int {
+		fired := 0
+		for i := 0; i < maxConsecutiveAutoRestarts*3; i++ {
+			if allowed, _ := state.authorizeAutoRestart(maxConsecutiveAutoRestarts); allowed {
+				fired++
+			}
+		}
+		return fired
+	}
+	// One healthy blip, exactly as a mid-restart-loop probe would see.
+	blip := func() {
+		state.ConsecutiveFails = 0
+		state.ConsecutiveOKs++
+		if state.ConsecutiveOKs >= minHealthyChecksToRearmAutoRestart {
+			state.RestartAttempts = 0
+			state.RestartSuppressed = false
+		}
+	}
+	fail := func() { state.ConsecutiveFails++; state.ConsecutiveOKs = 0 }
+
+	if got := spend(); got != maxConsecutiveAutoRestarts {
+		t.Fatalf("first outage fired %d restarts, want %d", got, maxConsecutiveAutoRestarts)
+	}
+
+	// Three separate blips, each immediately followed by failure again — the
+	// flapping pattern. None is a recovery, so none may refill the budget.
+	for round := 0; round < 3; round++ {
+		blip()
+		fail()
+		if got := spend(); got != 0 {
+			t.Fatalf("a lone healthy blip refilled the budget and bought %d more restarts "+
+				"in round %d — a unit that is down again at the very next check has not "+
+				"recovered, and this is how the loop stayed alive at ~5 restarts/hour",
+				got, round)
+		}
+	}
+
+	// A real recovery — healthy on consecutive checks — must still refill it.
+	for i := 0; i < minHealthyChecksToRearmAutoRestart; i++ {
+		blip()
+	}
+	if got := spend(); got != maxConsecutiveAutoRestarts {
+		t.Errorf("after %d consecutive healthy checks the budget must refill, got %d restarts",
+			minHealthyChecksToRearmAutoRestart, got)
+	}
+}
+
 // TestAutoRestartBudgetRearmsAfterRecovery guards the opposite direction: the
 // budget bounds a single continuous outage, not the service's whole lifetime. A
 // service that failed, was restarted, came back, and later fails again must get a
@@ -186,8 +246,12 @@ func TestAutoRestartBudgetRearmsAfterRecovery(t *testing.T) {
 		RestartAttempts: maxConsecutiveAutoRestarts, RestartSuppressed: true,
 	}
 
-	// A healthy check must clear the exhausted budget.
-	c.checkService(svc)
+	// Sustained health must clear the exhausted budget. One check is deliberately
+	// not enough (see TestFlappingUnitCannotRefillItsRestartBudget), so drive the
+	// full re-arm threshold against the real live unit.
+	for i := 0; i < minHealthyChecksToRearmAutoRestart; i++ {
+		c.checkService(svc)
+	}
 
 	state := c.states[svc.Name]
 	if state.Status != StatusUp {
