@@ -89,6 +89,11 @@ services:
     unit: bundle-store
     auto_restart: true
 
+  - name: event-store
+    type: systemd
+    unit: event-store
+    auto_restart: true
+
   - name: permission-store
     type: systemd
     unit: permission-store
