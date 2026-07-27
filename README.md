@@ -67,6 +67,17 @@ does not exist can never succeed, and when the phantom unit does exist but can
 never start (a shadow user unit whose port the real system unit already holds),
 that retry loop is unbounded. It once reached 811,295 restarts.
 
+That guard only catches a unit that is *missing*. A unit that exists and loads
+but still can never start slips past it, so `auto_restart` also carries a budget:
+**5 consecutive attempts**, after which the checker logs `RESTART SUPPRESSED`
+once — naming the likely causes — and stops. Any healthy check re-arms the
+budget, so the bound covers a single continuous outage rather than the service's
+lifetime. `GET /api/status` reports `restart_attempts` and `restart_suppressed`,
+which is how you tell a service healthcheck has given up on from one it is still
+retrying. Without the budget the mirror image of the 811k loop ran unbounded a
+second time: 1,325 futile restarts in 24h against the *system* `kayushkin.service`
+once the *user* unit of the same name took its port.
+
 ## API
 
 - `GET /api/status` — full status of all services + version drift info
