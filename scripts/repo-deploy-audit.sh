@@ -55,10 +55,22 @@
 #   on-disk    — executables in ~/bin and /usr/local/bin. What the NEXT spawn
 #                (or `-discover` subprocess) would pick up.
 #
-# Both are reported. A module with an on-disk artifact that no process runs, when
-# another artifact of the SAME module is running, is flagged as a ghost — that is
-# the ~/bin/llm-bridge-server trap above, and naming it is how we stop re-walking
+# Both are reported. An on-disk artifact that no process runs, when another
+# artifact of the SAME COMMAND is running, is flagged as a ghost — that is the
+# ~/bin/llm-bridge-server trap above, and naming it is how we stop re-walking
 # into it.
+#
+# "Same command" means the main package path (`go version -m`'s `path` line),
+# not the module and not the filename. Both of the other two are wrong here:
+#
+#   - the module holds many commands. scheduler ships ten, so keying ghosts on
+#     the module called all ten a ghost of each other, every night.
+#   - the filename differs across copies of one command. The three artifacts
+#     built from cmd/llm-bridge-server are two called `llm-bridge` and one
+#     called `llm-bridge-server`.
+#
+# The main package path separates the ten and unites the three. We report the
+# idle copies by path, since the path is what you delete.
 #
 # The second check: stale uncommitted work
 # ----------------------------------------
@@ -155,13 +167,15 @@ repo_has_active_session() {
 # 2. Enumerate deployed Go artifacts and ask each one where it came from.
 # ---------------------------------------------------------------------------
 
-# artifact_meta <path> → "modpath<TAB>revision<TAB>modified", empty if not Go.
+# artifact_meta <path> → "modpath<TAB>mainpkg<TAB>revision<TAB>modified",
+# empty if not Go. mainpkg is what tells two commands of one module apart.
 artifact_meta() {
   go version -m "$1" 2>/dev/null | awk '
+    $1 == "path"  { main_pkg = $2 }
     $1 == "mod"   { mod = $2 }
     $1 == "build" && $2 ~ /^vcs\.revision=/ { rev = substr($2, 14) }
     $1 == "build" && $2 ~ /^vcs\.modified=/ { mod_dirty = substr($2, 14) }
-    END { if (mod != "") printf "%s\t%s\t%s", mod, rev, mod_dirty }
+    END { if (mod != "") printf "%s\t%s\t%s\t%s", mod, main_pkg, rev, mod_dirty }
   '
 }
 
@@ -201,21 +215,22 @@ while IFS= read -r bin; do
   [ -z "$meta" ] && continue   # not a Go binary — nothing to compare
 
   modpath="$(printf '%s' "$meta" | cut -f1)"
-  rev="$(printf '%s' "$meta" | cut -f2)"
-  dirty="$(printf '%s' "$meta" | cut -f3)"
+  main_pkg="$(printf '%s' "$meta" | cut -f2)"
+  rev="$(printf '%s' "$meta" | cut -f3)"
+  dirty="$(printf '%s' "$meta" | cut -f4)"
 
   repo="${modpath##*/}"
   repo_path="$REPOS_DIR/$repo"
   running=false; is_running "$bin" && running=true
 
   if [ ! -d "$repo_path/.git" ]; then
-    rows="$rows$repo	$bin	$running	unmapped	0	$dirty	no repo at $repo_path for module $modpath"$'\n'
+    rows="$rows$repo	$bin	$main_pkg	$running	unmapped	0	$dirty	no repo at $repo_path for module $modpath"$'\n'
     continue
   fi
 
   if [ -z "$rev" ]; then
     # Built with -buildvcs=false, or from a tarball. We cannot know what it is.
-    rows="$rows$repo	$bin	$running	no-vcs	0	$dirty	binary carries no vcs.revision — cannot verify what it was built from"$'\n'
+    rows="$rows$repo	$bin	$main_pkg	$running	no-vcs	0	$dirty	binary carries no vcs.revision — cannot verify what it was built from"$'\n'
     [ "$running" = true ] && drift_fail=$((drift_fail + 1))
     continue
   fi
@@ -223,7 +238,7 @@ while IFS= read -r bin; do
   if ! git -C "$repo_path" cat-file -e "$rev^{commit}" 2>/dev/null; then
     # Built from a commit that no longer exists here: rebased away, or never
     # pushed. Unreproducible — you cannot rebuild what is running.
-    rows="$rows$repo	$bin	$running	orphan-rev	0	$dirty	built from ${rev:0:7}, which is not in this repo (rebased or never committed)"$'\n'
+    rows="$rows$repo	$bin	$main_pkg	$running	orphan-rev	0	$dirty	built from ${rev:0:7}, which is not in this repo (rebased or never committed)"$'\n'
     [ "$running" = true ] && drift_fail=$((drift_fail + 1))
     continue
   fi
@@ -244,15 +259,22 @@ while IFS= read -r bin; do
     fi
   fi
 
-  rows="$rows$repo	$bin	$running	$status	$behind	$dirty	$detail"$'\n'
+  rows="$rows$repo	$bin	$main_pkg	$running	$status	$behind	$dirty	$detail"$'\n'
 done <<<"$candidates"
 
-# Ghost artifacts: same module deployed twice, one running, one not. The idle one
-# is a decoy that will mislead the next audit (and the next human).
+# Ghost artifacts: one command, deployed to more than one path, and the copy you
+# are looking at is not the copy that runs. Those idle copies are decoys — they
+# mislead the next audit and the next human, so name them by path.
+#
+# Keyed on the main package (column 3), never the repo: a repo that ships ten
+# commands is not ten ghosts of itself.
 ghosts="$(
   printf '%s' "$rows" | awk -F'\t' '
-    NF { seen[$1] = seen[$1] " " $2; if ($3 == "true") runs[$1] = 1 }
-    END { for (m in seen) if (runs[m] && split(seen[m], a, " ") > 2) print m }
+    NF {
+      copies[$3]++
+      if ($4 == "true") { runs[$3] = 1 } else { idle[$3] = idle[$3] $2 "\n" }
+    }
+    END { for (pkg in runs) if (copies[pkg] > 1) printf "%s", idle[pkg] }
   ' | sort -u
 )"
 
@@ -337,7 +359,7 @@ def rows(env, fields):
         out.append(dict(zip(fields, parts)))
     return out
 
-drift = rows("DRIFT_ROWS", ["repo", "artifact", "running", "status", "behind", "built_dirty", "detail"])
+drift = rows("DRIFT_ROWS", ["repo", "artifact", "main_package", "running", "status", "behind", "built_dirty", "detail"])
 for d in drift:
     d["running"] = d["running"] == "true"
     d["built_dirty"] = d["built_dirty"] == "true"
@@ -349,7 +371,9 @@ for w in wip:
     for k in ("tracked_dirty", "untracked", "age_hours"):
         w[k] = int(w[k] or 0)
 
-ghosts = [g for g in os.environ.get("GHOSTS", "").split() if g]
+# Paths, one per line — split on lines, not on whitespace, so a path with a
+# space in it stays one entry.
+ghosts = [g.strip() for g in os.environ.get("GHOSTS", "").splitlines() if g.strip()]
 
 report = {
     "mode": "deploy",
