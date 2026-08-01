@@ -230,6 +230,14 @@ services:
   # so a bundle that no longer matches its source is stale JavaScript shipped to
   # real users from a tree whose git status is clean. After building the committed
   # source in a pristine clone, the clone must still be pristine.
+  #
+  # And, since 2026-08-01, it runs each package's own declared `check` script.
+  # bridge-ui's assertions live only in `npm run check`, and until then nothing
+  # in the fleet executed it: its build is `tsc`, so this guard proved the types
+  # compiled and ran not one assertion, while the smoke guard saw no
+  # scripts/e2e-smoke.sh and correctly declared it uncovered. Packages that
+  # declare no `check` are listed in the report as `without_check` rather than
+  # counted as covered.
   - name: repo-node-guard
     type: command
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-node-status.sh"]

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # repo-node-status — read the last repo-build-audit --node report and say whether
-# the fleet's TypeScript/React packages still install and build from a clean
-# clone of HEAD.
+# the fleet's TypeScript/React packages still install, build, and pass their own
+# declared `check` script from a clean clone of HEAD.
 #
 # healthcheck polls this as a `command` service (60s interval, 10s timeout), so
 # it must stay cheap: the expensive clean-clone sweep runs nightly under the
@@ -21,6 +21,11 @@
 # this host does not have), and there are two of them today. The count is printed
 # so the gap stays visible and shrinks, but a red-from-day-one check is a check
 # people learn to ignore — and an ignored guard is worse than no guard.
+#
+# The same call, for the same reason, on `without_check`: packages that install
+# and build but declare no `check` script, so the sweep ran no assertion about
+# how they behave. Declaring one is how a package opts in; the count is printed
+# so the gap is visible rather than mistaken for coverage.
 #
 # Prints a line containing "ok" (healthcheck's expect_output) and exits 0 when
 # the last sweep was clean and recent; otherwise prints why and exits 1.
@@ -82,11 +87,13 @@ if failed:
         [f.get("repo", "?") + " (" + f.get("stage", "?") + ")"
          for f in report.get("failures", [])]
     )
-    print(f"FAIL: {failed} node package(s) do not build from a clean clone of HEAD: {broken}")
+    print(f"FAIL: {failed} node package(s) do not build or check clean from a clean clone of HEAD: {broken}")
     sys.exit(1)
 
+without_check = len(report.get("without_check") or [])
 print(
-    f"ok: {ok}/{total} node packages install and build from a clean clone of HEAD "
-    f"({unguarded} unguarded, checked {age_hours:.1f}h ago)"
+    f"ok: {ok}/{total} node packages install, build and pass their declared checks "
+    f"from a clean clone of HEAD ({unguarded} unguarded, {without_check} declaring "
+    f"no check script, checked {age_hours:.1f}h ago)"
 )
 '

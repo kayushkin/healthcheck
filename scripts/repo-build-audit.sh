@@ -97,6 +97,35 @@
 # The build is deterministic (verified: byte-identical across runs, and the
 # committed hashes match), so any diff is real drift.
 #
+# The fourth stage, `check`, runs the package's own declared `check` script —
+# and only where the package declares one. It is the SAME contract as `build`,
+# not a widening of it: the paragraph above refuses a BOLTED-ON `tsc --noEmit`
+# because the package never adopted it, and by that same rule a script the
+# package DID adopt is exactly what this guard is supposed to run. `build` was
+# never the principle; it was the only script anyone had declared when this mode
+# was written.
+#
+# It exists because bridge-ui's assertions live nowhere else. Its whole test
+# mechanism is `npm run check` (scripts/render-check.mjs, esbuild-bundled and run
+# by node, so there is no framework to install), it covers the spend ceilings,
+# SSE batching, the kanban poll, the shared harness store and the session
+# deeplink — and until this stage existed NOTHING RAN IT. Its `build` is `tsc`,
+# so the node guard proved the types compiled and not one assertion executed;
+# the smoke guard saw no scripts/e2e-smoke.sh and correctly declared it
+# uncovered. Every check in that file could have gone red and no report would
+# have said so, which is the precise equivalence — a check that quietly does not
+# run is indistinguishable from one that is passing — that this whole file
+# exists to destroy.
+#
+# `check` and not `test`: `test` is npm's universal name and several packages
+# here declare one that needs a browser or a live service (kayushkin.com's is
+# `playwright test`), so gating on it would paint the guard red from day one —
+# the `go test` decision above, again. `check` is this fleet's name for the
+# assertions that run from a plain install, and adopting it is how a package
+# opts in. Packages that declare none are listed in the report as
+# `without_check`, the way --smoke lists `without_smoke`: an uncovered package
+# is named, never silently counted as passing.
+#
 # Hygiene: --elf
 # --------------
 # Everything above asks whether the committed source is CORRECT. --elf asks a
@@ -626,6 +655,12 @@ fi
 results=()   # name<TAB>status<TAB>stage<TAB>seconds<TAB>detail
 total=0; ok=0; failed=0; unguarded=0
 no_smoke=0   # smoke mode only: repos with a committed HEAD but no smoke to run
+# node mode only: packages that install and build but declare no `check` script,
+# so nothing in this sweep executes an assertion about their behaviour. Named in
+# the report rather than counted as ok-and-done, for the same reason --smoke
+# names the repos it has no smoke for: an uncovered package that goes unnamed is
+# read as a covered one.
+without_check=()
 
 if [ "$MODE" = "node" ]; then
   while IFS=$'\t' read -r repo sub; do
@@ -743,6 +778,38 @@ if [ "$MODE" = "node" ]; then
       if [ -n "$dirty" ]; then
         status="fail"; stage="artifact"
         detail="committed build output is STALE — building the committed source changed the tree: $dirty"
+      fi
+    fi
+
+    # check — the package's OWN declared `check` script, and only if it declares
+    # one. See the header: this is the build stage's contract applied to the
+    # second script a package can adopt, not a new one imposed on it.
+    #
+    # Ordered AFTER artifact deliberately. The artifact stage's claim is exactly
+    # "building the committed source changed the tree", and a check script is
+    # free to write scratch files (bridge-ui's bundles itself into
+    # node_modules/.cache). Run it first and any such write is misattributed to
+    # the build, turning a stage whose whole value is precision into a stage that
+    # cries stale-bundle at a test artifact.
+    if [ "$status" = "ok" ]; then
+      if node -e '
+          const pkg = require(process.argv[1] + "/package.json");
+          process.exit((pkg.scripts && pkg.scripts.check) ? 0 : 1);
+        ' "$dir" 2>/dev/null; then
+        run_stage "$dir" npm run check
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+          status="fail"; stage="check"
+          # A render check reports its own failures in prose ("FAIL: ..."), and
+          # that line is the entire thing a human sees at 03:30 — so it is read
+          # ahead of npm's exit-code boilerplate, never from the tail.
+          detail=$(echo "$STAGE_OUT" \
+            | grep -E '^(FAIL|✗|not ok)|assert|Error|error:' | head -4 | tr '\n' ' ' | cut -c1-500)
+          [ -z "$detail" ] && detail=$(echo "$STAGE_OUT" | grep -vE '^\s*$' | tail -4 | tr '\n' ' ' | cut -c1-500)
+          [ "$rc" -eq 124 ] && detail="check timed out after ${STAGE_TIMEOUT}s"
+        fi
+      else
+        without_check+=("$pkg")
       fi
     fi
 
@@ -1011,6 +1078,7 @@ printf '%s\n' "${results[@]}" |
   WITH_TESTS="$WITH_TESTS" \
   MODE="$MODE" \
   TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
+  WITHOUT_CHECK="$(printf '%s\n' ${without_check+"${without_check[@]}"})" \
   WORKTREES="$(printf '%s\n' ${linked_worktrees+"${linked_worktrees[@]}"})" \
   REPORT="$REPORT" \
   python3 -c '
@@ -1062,6 +1130,13 @@ else:
         report["node_version"] = os.environ["NODE_VERSION"]
         report["packages_total"] = int(os.environ["TOTAL"])
         report["unguarded_packages"] = [r["repo"] for r in rows if r["status"] == "unguarded"]
+        # Packages that installed and built but declare no `check` script, so
+        # this sweep executed no assertion about how they behave. Listed, not
+        # counted as a failure: declaring one is how a package opts in, and a
+        # guard that is red from day one is a guard people learn to ignore.
+        report["without_check"] = [
+            p for p in os.environ["WITHOUT_CHECK"].splitlines() if p.strip()
+        ]
     elif mode == "build":
         report["with_tests"] = os.environ["WITH_TESTS"] == "1"
     # elf carries no extra keys: it neither runs tests nor a toolchain.
@@ -1075,7 +1150,7 @@ echo
 if [ "$MODE" = "smoke" ]; then
   echo "$ok/$total binaries boot and answer from a clean clone of HEAD; $failed failing, $no_smoke with no smoke to run ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "node" ]; then
-  echo "$ok/$total node packages install and build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+  echo "$ok/$total node packages install, build and pass their declared checks from a clean clone of HEAD; $failed failing, $unguarded unguarded, ${#without_check[@]} declaring no check script ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "elf" ]; then
   echo "$ok/$total repos carry no committed ELF binary at HEAD; $failed with committed binaries, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 else

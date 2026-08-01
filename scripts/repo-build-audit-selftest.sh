@@ -144,6 +144,90 @@ REPOS_DIR="$OKDIR" REPORT="$ROOT/ok-smoke.json" bash "$AUDIT" --smoke >/dev/null
 check "smoke: distinct ports carry no worktree entries" \
       "0" "$(report_field "$ROOT/ok-smoke.json" 'len(d["worktrees"])')"
 
+# -------------------------------------------------------------- fixture CHECK
+# The node mode's `check` stage: the package's own declared `check` script.
+#
+# Three packages, because the stage has three outcomes and only running all
+# three proves it discriminates. A stage that runs nothing passes the "a broken
+# check fails" assertion just as happily as one that runs everything, provided
+# nothing else pins that a GOOD package stays green and a package with no check
+# script is neither failed nor silently forgotten.
+#
+# Each fixture package installs with `npm ci` from a lockfile with no
+# dependencies at all, so no stage here touches the network.
+CHECKDIR="$ROOT/checks"
+mkdir -p "$CHECKDIR"
+
+# make_node_pkg <dir> <check script or ->
+make_node_pkg() {
+  local dir="$1" checkscript="$2"
+  mkdir -p "$dir"
+  git -C "$dir" init -q .
+  git -C "$dir" config user.email selftest@localhost
+  git -C "$dir" config user.name selftest
+  local name; name=$(basename "$dir")
+  CHECK="$checkscript" NAME="$name" python3 -c '
+import json, os, sys
+scripts = {"build": "node -e \"0\""}
+if os.environ["CHECK"] != "-":
+    scripts["check"] = os.environ["CHECK"]
+pkg = {"name": os.environ["NAME"], "version": "1.0.0", "private": True,
+       "scripts": scripts}
+sys.stdout.write(json.dumps(pkg, indent=2) + "\n")
+' > "$dir/package.json"
+  # A lockfile with no packages: npm ci accepts it and installs nothing, which
+  # keeps the fixture offline and fast while still exercising the real install
+  # stage rather than skipping it.
+  NAME="$name" python3 -c '
+import json, os, sys
+sys.stdout.write(json.dumps({
+    "name": os.environ["NAME"], "version": "1.0.0", "lockfileVersion": 3,
+    "requires": True,
+    "packages": {"": {"name": os.environ["NAME"], "version": "1.0.0"}},
+}, indent=2) + "\n")
+' > "$dir/package-lock.json"
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm init
+}
+
+# Prints a line the detail extractor is supposed to surface, then exits nonzero
+# — the shape render-check.mjs actually fails in.
+make_node_pkg "$CHECKDIR/redpkg" 'node -e "console.log(\"FAIL: render check tripped\"); process.exit(1)"'
+make_node_pkg "$CHECKDIR/greenpkg" 'node -e "console.log(\"all checks pass\")"'
+make_node_pkg "$CHECKDIR/nocheckpkg" -
+
+if command -v npm >/dev/null 2>&1; then
+  REPOS_DIR="$CHECKDIR" REPORT="$ROOT/check-node.json" bash "$AUDIT" --node >"$ROOT/check.out" 2>&1
+  rc=$?
+
+  check "node: a package whose declared check FAILS fails the sweep" "1" "$rc"
+  check "node: the failure is attributed to the check stage, not the build" \
+        "check" \
+        "$(report_field "$ROOT/check-node.json" \
+           '[f["stage"] for f in d["failures"] if f["repo"]=="redpkg"][0]')"
+  # The detail line is the entire thing a human sees at 03:30, so pin that it
+  # carries the check script's own message and not npm exit-code boilerplate.
+  check "node: the detail carries the check script's own failure line" "yes" \
+        "$(case "$(report_field "$ROOT/check-node.json" \
+                  '[f["detail"] for f in d["failures"] if f["repo"]=="redpkg"][0]')" in
+             *"FAIL: render check tripped"*) echo yes ;; *) echo no ;; esac)"
+  check "node: exactly one package fails — a passing check is not collateral" \
+        "1" "$(report_field "$ROOT/check-node.json" 'd["failed"]')"
+  check "node: a package whose declared check PASSES stays ok" "ok" \
+        "$(report_field "$ROOT/check-node.json" \
+           '[r["status"] for r in d["results"] if r["repo"]=="greenpkg"][0]')"
+  # Declaring no check script is not a failure — but it must not be silent
+  # either, or an uncovered package reads as a covered one.
+  check "node: a package with no check script is not failed for it" "ok" \
+        "$(report_field "$ROOT/check-node.json" \
+           '[r["status"] for r in d["results"] if r["repo"]=="nocheckpkg"][0]')"
+  check "node: a package with no check script is named in without_check" \
+        "nocheckpkg" \
+        "$(report_field "$ROOT/check-node.json" '",".join(d["without_check"])')"
+else
+  echo "SKIP  node check-stage fixtures (npm is not on PATH)"
+fi
+
 # ------------------------------------------------------- fixture NO TOOLCHAIN
 # The other abort path, and the one the script's own comments already named: a
 # --node run from the scheduler's empty environment finds no npm and exits 2.
