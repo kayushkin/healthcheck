@@ -173,6 +173,42 @@ esac
 mkdir -p "$STATE_DIR"
 trap 'rm -rf "$WORK_ROOT"' EXIT
 
+started_at=$(date --iso-8601=seconds)
+start_epoch=$(date +%s)
+
+# write_aborted_report <reason> — leave a report saying the sweep did not happen.
+#
+# Exiting before the sweep used to leave the PREVIOUS night's report on disk,
+# untouched, and the repo-*-status.sh checks read that file. So a run that
+# checked nothing at all went on reporting "ok: 61/61 binaries boot and answer"
+# for another 36 hours, until the staleness clause finally tripped — the exact
+# equivalence this guard was written to destroy, reproduced by the guard's own
+# abort paths. It has bitten twice: a missing toolchain (the reason the mise
+# block above exists) and, on 2026-08-01, a port collision that a stray worktree
+# manufactured.
+#
+# A refusal to run is a verdict and gets written down like one. The counts are
+# zero and `aborted` carries the reason, so a check says what went wrong the same
+# morning instead of a generic STALE the following afternoon.
+#
+# Defined here, above the toolchain gate, because that gate is one of its callers.
+write_aborted_report() {
+  STARTED_AT="$started_at" MODE="$MODE" REASON="$1" REPORT="$REPORT" python3 -c '
+import json, os
+with open(os.environ["REPORT"], "w") as fh:
+    json.dump({
+        "mode": os.environ["MODE"],
+        "generated_at": os.environ["STARTED_AT"],
+        "aborted": os.environ["REASON"],
+        "duration_seconds": 0,
+        "repos_total": 0, "ok": 0, "failed": 0,
+        "failures": [], "results": [],
+    }, fh, indent=2)
+    fh.write("\n")
+'
+  echo "report: $REPORT (sweep aborted)"
+}
+
 # Put the REAL go toolchain on PATH, not mise's shim.
 #
 # Two distinct failures hide here. The scheduler runs this from a systemd unit
@@ -209,10 +245,12 @@ fi
 if [ "$MODE" = "node" ]; then
   if ! command -v npm >/dev/null 2>&1; then
     echo "FATAL: npm is not on PATH — cannot audit anything" >&2
+    write_aborted_report "npm is not on PATH — no toolchain, nothing was audited"
     exit 2
   fi
 elif [ "$MODE" != "elf" ] && ! command -v go >/dev/null 2>&1; then
   echo "FATAL: go is not on PATH — cannot audit anything" >&2
+  write_aborted_report "go is not on PATH — no toolchain, nothing was audited"
   exit 2
 fi
 
@@ -223,9 +261,6 @@ fi
 export GOFLAGS=
 export GOWORK=off
 export CGO_ENABLED="${CGO_ENABLED:-1}"
-
-started_at=$(date --iso-8601=seconds)
-start_epoch=$(date +%s)
 
 # provision <name> <dest_parent> — materialise a repo at its committed HEAD.
 # Prints "clone" if it came from a commit, "copy" if the repo is not under git
@@ -324,6 +359,34 @@ smoke_status() {
   esac
 }
 
+# is_linked_worktree <dir> — is this directory a second checkout of a repository
+# the sweep already walks, rather than a repository of its own?
+#
+# `git worktree add` is the workflow this box's own todos prescribe ("work from a
+# worktree off origin/main"), and workers make those worktrees as siblings under
+# ~/repos. A linked worktree answers `rev-parse --git-dir` exactly like a real
+# repository, so every loop below counted one as an extra repo: the Go and ELF
+# passes built and scanned the same tree twice, and the smoke pass did worse. A
+# worktree ships its parent's committed smoke, so the derived port registry saw
+# two claims on one number and check_port_collisions aborted the WHOLE sweep
+# before a single smoke booted.
+#
+# That is not a hypothetical. On 2026-08-01 a worker left
+# ~/repos/llm-bridge-server-workdir behind; the 03:30 run died in one second, all
+# 61 smokes went unrun, and smoke-report.json kept the previous night's verdict —
+# so the guard read green for another day while measuring nothing. The guard's
+# own recommended workflow switched the guard off.
+#
+# The test is git's own and never looks at the directory's name: in a linked
+# worktree the per-worktree git dir (<repo>/.git/worktrees/<name>) differs from
+# the repository's common dir; in a main checkout the two are the same path.
+is_linked_worktree() {
+  local dir="$1" gitdir common
+  gitdir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$gitdir" != "$common" ]
+}
+
 # check_port_collisions — no two smokes may declare the same default port.
 #
 # Smokes run SERIALLY, and for a long time that was taken to mean sharing a port
@@ -355,6 +418,7 @@ check_port_collisions() {
     for path in "$REPOS_DIR"/*/; do
       name=$(basename "$path")
       git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
+      is_linked_worktree "$path" && continue
       git -C "$path" show HEAD:scripts/e2e-smoke.sh 2>/dev/null |
         grep -oE '^[A-Z_]+="\$\{E2E_[A-Z_]+:-[0-9]{4,5}\}"' |
         while IFS= read -r line; do
@@ -374,6 +438,22 @@ check_port_collisions() {
   echo "repo whose tree is fine. Give each smoke its own number." >&2
   return 1
 }
+
+# Find the linked worktrees once, so every pass skips the same set and the report
+# can name them. A skipped worktree is announced, not swallowed: this guard's
+# whole premise is that a check which quietly does not run is indistinguishable
+# from one that is passing, and that applies to its own coverage as much as to a
+# repo's. The repository behind each worktree is still swept, on its own path.
+linked_worktrees=()   # "<dir name>\t<repository path>"
+for path in "$REPOS_DIR"/*/; do
+  git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
+  is_linked_worktree "$path" || continue
+  linked_worktrees+=("$(basename "$path")	$(git -C "$path" worktree list --porcelain 2>/dev/null |
+                        awk '/^worktree /{print $2; exit}')")
+done
+for row in ${linked_worktrees+"${linked_worktrees[@]}"}; do
+  echo "WORKTREE  ${row%%	*} (linked worktree of ${row#*	} — swept there, not counted here)"
+done
 
 # run_smoke <repo_dir> <scratch> — run the repo's own smoke from the clean clone.
 #
@@ -417,6 +497,7 @@ list_node_packages() {
   for path in "$REPOS_DIR"/*/; do
     name=$(basename "$path")
     git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    is_linked_worktree "$path" && continue
     git -C "$path" ls-tree -r HEAD --name-only 2>/dev/null |
       grep -E '^([^/]+/)?package\.json$' |
       while IFS= read -r rel; do
@@ -538,6 +619,7 @@ for spec in deps.values():
 # Fail fast, before any smoke boots: two smokes on one port make the guard flaky,
 # and a flaky guard is worse than no guard. See check_port_collisions.
 if [ "$MODE" = "smoke" ] && ! check_port_collisions; then
+  write_aborted_report "two or more smokes declare the same default port — no smoke ran"
   exit 1
 fi
 
@@ -686,6 +768,7 @@ if [ "$MODE" = "elf" ]; then
   for path in "$REPOS_DIR"/*/; do
     name=$(basename "$path")
     [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+    is_linked_worktree "$path" && continue
     total=$((total + 1))
 
     if ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
@@ -771,6 +854,7 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   name=$(basename "$path")
   [ -f "$path/go.mod" ] || continue
   [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+  is_linked_worktree "$path" && continue
 
   if ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
     # No committed HEAD exists, so there is nothing for this guard to verify.
@@ -927,6 +1011,7 @@ printf '%s\n' "${results[@]}" |
   WITH_TESTS="$WITH_TESTS" \
   MODE="$MODE" \
   TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
+  WORKTREES="$(printf '%s\n' ${linked_worktrees+"${linked_worktrees[@]}"})" \
   REPORT="$REPORT" \
   python3 -c '
 import json, os, sys
@@ -950,6 +1035,16 @@ report = {
     "failed": int(os.environ["FAILED"]),
     "failures": [r for r in rows if r["status"] == "fail"],
     "results": rows,
+    # Directories under the repos root that are a second checkout of a repository
+    # already in this sweep. Named rather than dropped: the counts above exclude
+    # them, and a reader comparing repos_total against a directory listing needs
+    # to see why the two differ. See is_linked_worktree.
+    "worktrees": [
+        {"dir": d, "repository": p}
+        for d, _, p in (
+            line.partition("\t") for line in os.environ["WORKTREES"].splitlines() if line.strip()
+        )
+    ],
 }
 if mode == "smoke":
     # repos_total counts only repos that BUILD A BINARY — a library has nothing

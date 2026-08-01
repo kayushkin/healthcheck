@@ -48,6 +48,14 @@ except Exception as err:
     print(f"FAIL: repo-node report is unreadable ({err})")
     sys.exit(1)
 
+aborted = report.get("aborted")
+if aborted:
+    # The sweep refused to start, so every count below is zero and reporting them
+    # would read as "nothing is broken". Say what stopped it instead. Checked
+    # before staleness because an abort is fresh news, not old news.
+    print(f"FAIL: repo-node sweep did not run — {aborted}. Nothing was checked.")
+    sys.exit(1)
+
 generated = datetime.datetime.fromisoformat(report["generated_at"])
 if generated.tzinfo is None:
     print("FAIL: report generated_at has no timezone offset")

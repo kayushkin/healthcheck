@@ -14,9 +14,12 @@
 # expensive clean-clone-and-boot sweep runs nightly under the scheduler and
 # leaves its verdict in smoke-report.json. This only reads that verdict.
 #
-# It fails on a STALE report as loudly as on a failing smoke. A guard that
-# quietly stopped running looks exactly like a guard that is passing, and that
-# equivalence is what let a broken tree ship for 3.5 months.
+# It fails on a STALE report as loudly as on a failing smoke, and on an ABORTED
+# one sooner still. A guard that quietly stopped running looks exactly like a
+# guard that is passing, and that equivalence is what let a broken tree ship for
+# 3.5 months. A sweep that refused to start writes `aborted` into the report
+# rather than leaving the previous night's verdict in place, so the same morning
+# says what stopped it instead of a generic STALE the next afternoon.
 #
 # It does NOT fail on repos that ship no smoke yet. Coverage is reported as a
 # number so the gap stays visible and shrinks, but a red-from-day-one check is a
@@ -50,6 +53,14 @@ except Exception as err:
 
 if report.get("mode") != "smoke":
     print("FAIL: repo-smoke report is not a --smoke report (mode=" + str(report.get("mode")) + ")")
+    sys.exit(1)
+
+aborted = report.get("aborted")
+if aborted:
+    # The sweep refused to start, so every count below is zero and reporting them
+    # would read as "nothing is broken". Say what stopped it instead. Checked
+    # before staleness because an abort is fresh news, not old news.
+    print(f"FAIL: repo-smoke sweep did not run — {aborted}. No binary was checked.")
     sys.exit(1)
 
 generated = datetime.datetime.fromisoformat(report["generated_at"])
