@@ -166,13 +166,15 @@ func (a *Alerter) createEscalationSession(name string, state checker.ResourceSta
 	)
 
 	displayName := fmt.Sprintf("[ALERT] %s auto-cleanup exhausted", name)
-	clientID := fmt.Sprintf("healthcheck-%s-%d", name, time.Now().Unix())
 
+	// See the note in checker/resource.go: "source" is a field the bridge no
+	// longer reads, and type/purpose/origin are what classify the session.
 	createBody, _ := json.Marshal(map[string]any{
 		"harness":      "claude_code",
-		"client_id":    clientID,
 		"display_name": displayName,
-		"source":       "healthcheck",
+		"type":         "autonomous",
+		"purpose":      "healthcheck",
+		"origin":       "healthcheck",
 		"auto_start":   true,
 	})
 	client := &http.Client{Timeout: 30 * time.Second}

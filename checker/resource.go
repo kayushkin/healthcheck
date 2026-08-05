@@ -282,15 +282,20 @@ func (c *Checker) spawnCCAgent(res ResourceConfig, state *ResourceState) {
 		res.Type, state.UsagePct, res.Threshold, state.Detail, res.Type,
 	)
 	displayName := fmt.Sprintf("ALERT: %s usage critical at %.1f%%", res.Type, state.UsagePct)
-	clientID := fmt.Sprintf("healthcheck-%s-%d", res.Name, time.Now().Unix())
 
 	log.Printf("CC-AGENT: spawning bridge session for %s alert (%.1f%% >= %.1f%%)", res.Name, state.UsagePct, res.Threshold)
 
+	// type/purpose/origin classify the session and the bridge rejects a create
+	// without the first two. This used to send "source", which the bridge
+	// renamed to "purpose" in May 2026 and now drops on decode — so every
+	// auto-cleanup agent landed unclassified and got backfilled into someone's
+	// chat list as a human conversation.
 	createBody, _ := json.Marshal(map[string]any{
 		"harness":      "claude_code",
-		"client_id":    clientID,
 		"display_name": displayName,
-		"source":       "healthcheck",
+		"type":         "autonomous",
+		"purpose":      "healthcheck",
+		"origin":       "healthcheck",
 		"auto_start":   true,
 	})
 	client := &http.Client{Timeout: 30 * time.Second}
