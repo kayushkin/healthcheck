@@ -294,6 +294,41 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-elf-status.sh"]
     expect_output: "ok"
 
+  # A different axis from the four above: those watch repos, this watches the
+  # session table. Every session row carries type (how it runs), purpose (what it
+  # does) and origin (who created it). All three are load-bearing — permission
+  # gating reads type to decide whether a human is there to answer a tool prompt,
+  # folder routing reads purpose, and the chat list, the kanban classifier and
+  # every dashboard filter read all three. A row that misstates them routes real
+  # decisions off a false premise, and it cannot be corrected afterwards because
+  # the caller that knew the truth is long gone.
+  #
+  # For months nothing validated them: POST /sessions stored whatever arrived,
+  # empty strings included, while the wire contract documented all three as
+  # required. Then a startup migration read "no type" as "interactive" and
+  # rewrote those rows into human chats — on every open, not once. 987 sessions
+  # were misclassified before anyone looked, including 91 `claude -p` runs the
+  # bridge never ran at all.
+  #
+  # Same shape as the guards above: the sweep runs nightly under the scheduler
+  # (session-taxonomy-guard job) against bridge-server's GET
+  # /session-taxonomy/report and leaves its verdict in
+  # session-taxonomy-report.json; this check only reads that verdict. The
+  # vocabulary deliberately does NOT live in this repo — it lives in Go, in
+  # llm-bridge/msg/purpose.go. A list of valid slugs here would be a second copy
+  # of the registry, which is the exact failure above: the folder map was a
+  # second copy and drifted from it for months.
+  #
+  # Only classifications still being PRODUCED fail. History cannot be un-created,
+  # and a guard that stays red over one-off rows from months ago is one people
+  # learn to ignore — worse than no guard, because the dashboard still claims
+  # something is being watched. Old rows are counted and reported, never hidden.
+  # STALE fails as loudly as a finding, for the same reason it does elsewhere.
+  - name: session-taxonomy-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/session-taxonomy-status.sh"]
+    expect_output: "ok"
+
   # System (non-user) units
   - name: llm-bridge
     type: systemd
