@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 #
-# repo-build-audit-selftest — pin the repository-discovery rules of
-# repo-build-audit.sh against fixtures, without touching ~/repos.
+# repo-guard-selftest — pin the behaviour of this box's repo guards against
+# fixtures, without touching ~/repos.
+#
+# It started as a test of one sweep's repository-discovery rules and grew, one
+# finding at a time, to cover both sweep scripts (repo-build-audit.sh in its
+# four modes, and repo-deploy-audit.sh) and all six status readers. Renamed
+# 2026-08-08, when the deploy cases landed and the old name named one of the two
+# scripts it tests. Nothing invokes this file but a human, so the rename cost
+# only this comment — see the note about that at the foot of the file.
 #
 # The sweep decides what a repository IS by looping over the directories under
 # the repos root, and that decision had no test at all. It cost a full night of
@@ -22,13 +29,20 @@
 #     fix must not have disarmed — an "is not counted" assertion is trivially
 #     satisfied by counting nothing).
 #
-# Usage: scripts/repo-build-audit-selftest.sh     (exit 0 = all pinned)
+# Usage: scripts/repo-guard-selftest.sh     (exit 0 = all pinned)
+#
+# ⚠️ NOTHING RUNS THIS. Measured 2026-08-08: no scheduler job invokes it, and
+# healthcheck's config.yaml declares no check for it, while the five guards it
+# pins all run nightly under the scheduler. So every assertion here is a claim
+# that is only true on the last day somebody typed the command. Tracked as its
+# own todo rather than fixed in passing, because putting it on a schedule is a
+# change to the cron fleet.
 
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUDIT="$HERE/repo-build-audit.sh"
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/repo-build-audit-selftest.XXXXXX")
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/repo-guard-selftest.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 
 pass=0; fail=0
@@ -247,6 +261,66 @@ status_out=$(REPORT="$ROOT/notool.json" bash "$HERE/repo-node-status.sh" 2>&1)
 check "status: a missing toolchain fails the check" "1" "$?"
 check "status: the failure names the toolchain" "yes" \
       "$(case "$status_out" in *"npm is not on PATH"*) echo yes ;; *) echo "no: $status_out" ;; esac)"
+
+# ------------------------------------------------- fixture DEPLOY NO TOOLCHAIN
+# The same abort path in the OTHER sweep script. repo-deploy-audit.sh is a
+# separate file with its own toolchain gate, and until 2026-08-08 that gate
+# exited 2 without writing anything — so a missing go left the previous report
+# on disk and repo-deploy-status.sh went on printing "ok: all 72 deployed
+# artifacts match their committed HEAD" for a run that identified none of them.
+# Measured against a real report before the fix: reader exit 0, green line.
+#
+# The two sweeps had drifted apart with nobody comparing them: the build family
+# grew write_aborted_report, session-taxonomy-audit.sh grew it too, and deploy
+# never did. Per-file review cannot see that; this fixture pins the parity.
+#
+# HOME is redirected as well as PATH because this sweep finds go by globbing
+# $HOME/.local/share/mise/installs/go/*/bin directly, not through MISE_BIN.
+# If a go still resolves (a host with /usr/local/go/bin), the sweep runs for
+# real and writes no `aborted` — so the first check below goes red rather than
+# passing vacuously.
+DEPLOY_AUDIT="$HERE/repo-deploy-audit.sh"
+mkdir -p "$ROOT/nohome" "$ROOT/nobin"
+PATH="$STRIPPED" HOME="$ROOT/nohome" REPOS_DIR="$OKDIR" BIN_DIRS="$ROOT/nobin" \
+  REPORT="$ROOT/deploy-notool.json" bash "$DEPLOY_AUDIT" >/dev/null 2>&1
+check "deploy: a missing toolchain writes an aborted report" \
+      "True" "$(report_field "$ROOT/deploy-notool.json" 'bool(d.get("aborted"))')"
+check "deploy: the aborted report identifies no artifacts" \
+      "0" "$(report_field "$ROOT/deploy-notool.json" 'd["artifacts_total"]')"
+# Pinned because the reader checks mode FIRST. An aborted report stamped
+# anything else is refused for its mode, the abort branch never runs, and every
+# check below would pass with that branch deleted.
+check "deploy: the aborted report is stamped mode=deploy, so the abort branch is reachable" \
+      "deploy" "$(report_field "$ROOT/deploy-notool.json" 'd["mode"]')"
+
+deploy_out=$(REPORT="$ROOT/deploy-notool.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+deploy_rc=$?
+check "status: an aborted deploy report fails BY NAME, not as staleness" \
+      "1 yes" \
+      "$deploy_rc $(case "$deploy_out" in
+                      *"did not run"*"go is not on PATH"*) echo yes ;;
+                      *) echo "no: $deploy_out" ;;
+                    esac)"
+
+# The other direction: the SAME report with the abort key removed must fail for
+# a different, named reason. Without this, the check above passes just as well
+# if the reader refuses every deploy report it is ever handed, and the abort
+# branch would be proving nothing about aborts.
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("aborted")
+json.dump(d, open(sys.argv[2], "w"), indent=2)
+' "$ROOT/deploy-notool.json" "$ROOT/deploy-noabort.json"
+noabort_out=$(REPORT="$ROOT/deploy-noabort.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+noabort_rc=$?
+check "status: with the abort key gone the same report fails for another reason — the branch is what catches it" \
+      "1 yes" \
+      "$noabort_rc $(case "$noabort_out" in
+                       *"did not run"*) echo "no: $noabort_out" ;;
+                       *"identified 0 deployed artifacts"*) echo yes ;;
+                       *) echo "no: $noabort_out" ;;
+                     esac)"
 
 # ------------------------------------------------------------ fixture --only
 # --only writes the SAME report path as a full sweep, so a filtered run used to

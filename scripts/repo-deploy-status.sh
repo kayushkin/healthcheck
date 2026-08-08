@@ -11,10 +11,11 @@
 # does: a guard that quietly stopped running is indistinguishable from a guard
 # that is passing, and that equivalence is the entire bug class.
 #
-# It also refuses a report stamped for another MODE, one that identified zero
-# artifacts, and one that states no max_behind tolerance. This file reads every
-# field with a default, so each of those three used to produce a GREEN line over
-# a comparison that never happened rather than an error.
+# It also refuses a report stamped for another MODE, one whose sweep ABORTED
+# before it started, one that identified zero artifacts, and one that states no
+# max_behind tolerance. This file reads every field with a default, so each of
+# those four used to produce a GREEN line over a comparison that never happened
+# rather than an error.
 #
 # Prints a line containing "ok" (healthcheck's expect_output) and exits 0 when
 # nothing running is stale and no work is abandoned; otherwise prints why.
@@ -52,6 +53,24 @@ if report.get("mode") != "deploy":
     # printed "ok: all 0 deployed artifacts match their committed HEAD within ?
     # commits" and exited 0. Both sweeps stamp mode on every report they write.
     print("FAIL: repo-deploy report is not a --deploy report (mode=" + str(report.get("mode")) + ")")
+    sys.exit(1)
+
+aborted = report.get("aborted")
+if aborted:
+    # The sweep refused to start, so every count below is zero and reporting
+    # them would read as "nothing is broken". Say what stopped it instead.
+    # Checked before staleness because an abort is fresh news, not old news:
+    # the report it wrote is stamped seconds ago, so the age clause passes and
+    # only this branch can catch it.
+    #
+    # Until 2026-08-08 the sweep wrote no report at all when it aborted and
+    # this branch did not exist, so a missing go toolchain left the report from
+    # the night before in place and this reader announced a green fleet over a
+    # run that identified zero artifacts.
+    #
+    # No apostrophes in this block: it is embedded in a single-quoted shell
+    # string, and a nested one silently ends it. This comment cost a run.
+    print(f"FAIL: repo-deploy sweep did not run — {aborted}. Nothing was checked.")
     sys.exit(1)
 
 generated = datetime.datetime.fromisoformat(report["generated_at"])

@@ -130,15 +130,60 @@ FRESH_MINUTES="${FRESH_MINUTES:-120}"   # touched this recently ⇒ assume live
 
 mkdir -p "$STATE_DIR"
 
+started_at="$(date -Iseconds)"
+
+# write_aborted_report <reason> — leave a report saying the sweep did not happen.
+#
+# This guard used to exit before writing anything, which left the PREVIOUS
+# night's deploy-report.json untouched — and repo-deploy-status.sh reads that
+# file. Measured 2026-08-08 on a real report: a run that identified nothing at
+# all still printed "ok: all 72 deployed artifacts match their committed HEAD
+# within 5 commits" and exited 0. Staleness eventually catches it, but only
+# after MAX_AGE_HOURS=36, so the guard says nothing for a day and a half and
+# then blames the wrong thing.
+#
+# A refusal to run is a verdict and gets written down like one. Both sibling
+# guards already do this (repo-build-audit.sh, session-taxonomy-audit.sh); this
+# one was the last that did not, and nothing compared them.
+#
+# The counts are zero and `aborted` carries the reason, so a check says what
+# went wrong the same morning instead of a generic STALE the following
+# afternoon. `thresholds` is deliberately absent: a reader that somehow gets
+# past the abort branch then has no tolerance number to print, and this
+# guard's reader already refuses a report that states none.
+#
+# Defined here, above the toolchain gate, because that gate is its caller.
+write_aborted_report() {
+  STARTED_AT="$started_at" REASON="$1" REPORT="$REPORT" python3 -c '
+import json, os
+with open(os.environ["REPORT"], "w") as fh:
+    json.dump({
+        "mode": "deploy",
+        "generated_at": os.environ["STARTED_AT"],
+        "aborted": os.environ["REASON"],
+        "duration_seconds": 0,
+        "artifacts_total": 0,
+        "drift_failures": 0,
+        "wip_failures": 0,
+        "stale_running": [], "behind": [], "ghost_artifacts": [],
+        "stale_wip": [], "artifacts": [], "worktrees": [],
+    }, fh, indent=2)
+    fh.write("\n")
+'
+  echo "report: $REPORT (sweep aborted)"
+}
+
 # Put the REAL go toolchain on PATH, not mise's shim — `go version -m` on a
 # shim resolves the shim, not the binary we asked about.
 for candidate in /usr/local/go/bin "$HOME/.local/share/mise/installs/go"/*/bin; do
   [ -x "$candidate/go" ] && { export PATH="$candidate:$PATH"; break; }
 done
 
-command -v go >/dev/null 2>&1 || { echo "FAIL: no go toolchain on PATH"; exit 2; }
-
-started_at="$(date -Iseconds)"
+if ! command -v go >/dev/null 2>&1; then
+  echo "FATAL: go is not on PATH — cannot audit anything" >&2
+  write_aborted_report "go is not on PATH — no toolchain, nothing was audited"
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Which repos have an active agent session right now?
