@@ -416,6 +416,19 @@ for mode_reader in ":build:repo-build-audit-status.sh" \
   REPOS_DIR="$EMPTY" REPORT="$ROOT/empty-$tag.json" bash "$AUDIT" $flag >/dev/null 2>&1
   check "empty: a $tag sweep of an empty root judges nothing" \
         "0" "$(report_field "$ROOT/empty-$tag.json" 'd["ok"] + d["failed"]')"
+  # `ok + failed` is deliberately NOT enough, and this pair is here because the
+  # check above was green throughout the whole life of a real bug. Discovery
+  # globbed "$REPOS_DIR"/*/ without nullglob, so an empty root yielded the
+  # PATTERN as a directory name and --elf booked a repository literally called
+  # `*` — as `unguarded`, which is counted by neither `ok` nor `failed`. The
+  # denominator every reader prints said 1 while the assertion above said 0 and
+  # both were reporting the same run. Pin the count the readers actually use,
+  # and pin the name too: a future miscount that happens to land on zero would
+  # slip past a bare total, and the name is what made the defect legible.
+  check "empty: a $tag sweep counts no repository at all, not merely no verdict" \
+        "0" "$(report_field "$ROOT/empty-$tag.json" 'd["repos_total"]')"
+  check "empty: a $tag sweep invents no repository from the unexpanded glob" \
+        "[]" "$(report_field "$ROOT/empty-$tag.json" '[r["repo"] for r in d.get("results") or []]')"
   # Pinned because it is the whole reason a count check is needed: if the sweep
   # DID record an abort here, the pre-existing abort check would already catch
   # this and the refusal below would be untestable dead code.
@@ -435,6 +448,22 @@ if command -v npm >/dev/null 2>&1; then
   REPOS_DIR="$EMPTY" REPORT="$ROOT/empty-node.json" bash "$AUDIT" --node >/dev/null 2>&1
   check "empty: a node sweep of an empty root judges nothing" \
         "0" "$(report_field "$ROOT/empty-node.json" 'd["ok"] + d["failed"]')"
+  # Same pair as the loop above, but it is NOT the same assertion, and the
+  # difference is written down because the first draft of this comment got it
+  # wrong. The other three modes count directories, so an unexpanded glob
+  # becomes a counted repository; node counts PACKAGES, emitted row by row from
+  # `git ls-tree` against each candidate. A path that does not exist yields no
+  # rows, so node contributes nothing whatever the glob does.
+  #
+  # Verified, not assumed: with nullglob removed AND node's `git -C rev-parse`
+  # guard deleted, these two stayed green while the elf pair went red. So node
+  # is immune structurally, not by the lucky ordering that saved build and
+  # smoke. This pair is a regression pin on the count — it cannot detect the
+  # `*` defect, and must not be cited as coverage for it.
+  check "empty: a node sweep counts no package at all, not merely no verdict" \
+        "0" "$(report_field "$ROOT/empty-node.json" 'd["repos_total"]')"
+  check "empty: a node sweep invents no package from the unexpanded glob" \
+        "[]" "$(report_field "$ROOT/empty-node.json" '[r["repo"] for r in d.get("results") or []]')"
   check "empty: a node sweep records no abort, so only a count check can catch it" \
         "None" "$(report_field "$ROOT/empty-node.json" 'repr(d.get("aborted"))')"
   empty_out=$(REPORT="$ROOT/empty-node.json" bash "$HERE/repo-node-status.sh" 2>&1)

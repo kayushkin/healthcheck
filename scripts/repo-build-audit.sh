@@ -216,6 +216,31 @@
 
 set -uo pipefail
 
+# Every repository-discovery loop below globs "$REPOS_DIR"/*/. Without nullglob,
+# a root with no subdirectories does not expand to nothing — bash passes the
+# PATTERN through as if it were a directory name, and the sweep goes on to
+# classify a repository literally called `*`. That is not the empty-root curio it
+# looks like: `repos_total` is the denominator every reader prints, and it was
+# counting a directory that does not exist. Measured on an empty root before this
+# line existed: --elf reported repos_total=1, unguarded=1, results[0].repo == "*".
+#
+# --build and --smoke escaped only because their first act on a candidate is
+# `[ -f "$path/go.mod" ]`, which the literal happens to fail. That is correct by
+# accident, not by intent, and the accident is one reordered line from ending —
+# --elf counts before it checks, which is exactly how --elf broke. (--node is
+# immune for a different and sturdier reason: it counts PACKAGES emitted from
+# `git ls-tree`, not directories, so a path that does not exist yields no rows.
+# Measured — with this line removed and node's git guard deleted too, node still
+# reported zero while --elf reported `*`.)
+# So this is set once, globally, rather than at the four loops: the guarantee
+# wanted is about discovery as a whole, and a per-loop fix leaves the next loop
+# somebody adds carrying the same defect.
+#
+# Safe here: the only other unquoted `*` in this file are `${row%%*}`-style
+# parameter expansions and a python starred-unpack, none of which are pathname
+# expansion. Pinned by the `empty:` cases in repo-guard-selftest.sh.
+shopt -s nullglob
+
 MODE=build
 
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
