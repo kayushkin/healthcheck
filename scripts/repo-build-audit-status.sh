@@ -102,13 +102,22 @@ if age_hours > max_age:
     sys.exit(1)
 
 if ok + failed == 0:
-    # Judged, not merely SEEN. repos_total counts every repo the sweep looked at,
-    # including the unguarded ones it could not judge at all, so it is the wrong
-    # quantity to gate on: a sweep in which every repo came back unguarded prints
-    # a repos_total the reader is happy with and an ok count of zero. This check
-    # was written against repos_total first and the selftest caught it — an --elf
-    # sweep of an empty root reports repos_total=1 having scanned nothing, because
-    # the unmatched glob is swept as a repo literally named *.
+    # Judged, not merely SEEN. repos_total is the wrong quantity to gate on for
+    # two separate reasons, and only the first was written down here originally:
+    # it includes the unguarded repos the sweep could not judge at all, so a sweep
+    # in which every repo came back unguarded prints a repos_total the reader is
+    # happy with and an ok count of zero. This check was written against
+    # repos_total first and the selftest caught it — an --elf sweep of an empty
+    # root reports repos_total=1 having scanned nothing, because the unmatched
+    # glob is swept as a repo literally named *.
+    #
+    # The second reason, measured 2026-08-08: repos_total does NOT count every
+    # repo the sweep looked at, which is what the sentence here used to claim. It
+    # counts what survived the filters — --build drops the 10 directories with no
+    # go.mod, --smoke drops those plus the 10 Go repos with no `package main`,
+    # and until that date neither left any trace in the report. The accounting
+    # check below is what closes that gap; this one cannot, because it gates on a
+    # number that is already net of the exclusions.
     #
     # A sweep that judged nothing is not a clean fleet. It writes no `aborted` and
     # no `only`, so every check above passes in turn and this file used to print
@@ -116,6 +125,60 @@ if ok + failed == 0:
     # reach: the root comes from REPOS_DIR, and this guard runs from a systemd unit
     # whose Environment has already been wrong twice.
     print("FAIL: repo-build sweep judged 0 repositories, so nothing was checked.")
+    sys.exit(1)
+
+if "directories_scanned" not in report:
+    # Written by every non-node sweep since 2026-08-08. A report without it is
+    # either older than that or was produced by something other than this sweep;
+    # either way the coverage below cannot be reconciled, and an unreconcilable
+    # coverage claim is the thing this file exists to refuse.
+    #
+    # ⚠️ What this branch buys, measured by deleting it: NOT the difference
+    # between green and red. Without it the next line raises KeyError, python
+    # exits 1, and the check goes red anyway — safe, just illegible. It buys a
+    # sentence that names the cause instead of a traceback. Said plainly because
+    # the alternative is a future reader disproving an overclaim here and reading
+    # that as clearance to delete the branch. The refusal that genuinely changes
+    # the verdict is the reconciliation below: with THAT one removed, an
+    # unbalanced report prints ok: 2/2 and exits 0.
+    print(
+        "FAIL: repo-build report carries no coverage accounting "
+        "(directories_scanned is absent), so how much of the fleet it covered "
+        "cannot be established. Re-run the sweep."
+    )
+    sys.exit(1)
+
+# The coverage identity:
+#
+#   directories_scanned == repos_total
+#                        + worktrees + without_go_mod + without_main_package
+#                        + skipped_by_only
+#
+# It is an identity, not a policy. It passes no judgement on whether an exclusion
+# was reasonable — only that every directory under the root left the sweep by a
+# route the report names. When it fails, a directory stopped being covered
+# through a path nobody wrote down.
+#
+# That is worth a refusal because shrinking coverage is invisible in the
+# direction that looks healthy: a repo that loses its go.mod, or whose only
+# `package main` moves somewhere uncommitted, simply leaves repos_total, and
+# ok: N/N goes on printing with a smaller N. Every other exclusion in this sweep
+# was already announced — worktrees, unguarded, no_smoke, without_check. These
+# two were the ones that were not.
+scanned = report["directories_scanned"]
+excluded = (
+    len(report.get("worktrees", []))
+    + len(report.get("without_go_mod", []))
+    + len(report.get("without_main_package", []))
+    + report.get("skipped_by_only", 0)
+)
+if scanned != total + excluded:
+    print(
+        f"FAIL: repo-build coverage does not reconcile — {scanned} directories under "
+        f"the repos root, but {total} judged plus {excluded} named as excluded "
+        f"= {total + excluded}. Some directory left the sweep by a route the "
+        f"report does not record, so the coverage figure below is not trustworthy."
+    )
     sys.exit(1)
 
 if failed:
@@ -128,8 +191,13 @@ if failed:
     print(f"FAIL: {failed} repo(s) do not build from a clean clone of HEAD: {broken}")
     sys.exit(1)
 
+# The coverage figure is printed, not merely reconciled. The identity above
+# proves the numbers add up; it cannot tell that 71 was 72 last night. Putting
+# both halves on the line a human actually reads is what makes a repo silently
+# leaving the sweep look different from a clean fleet.
 print(
     f"ok: {ok}/{total} repos build from a clean clone of HEAD "
-    f"({unguarded} unguarded, checked {age_hours:.1f}h ago)"
+    f"({total} of {scanned} directories under the repos root are Go repos, "
+    f"{unguarded} unguarded, checked {age_hours:.1f}h ago)"
 )
 '

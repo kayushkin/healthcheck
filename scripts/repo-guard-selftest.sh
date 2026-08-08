@@ -397,6 +397,159 @@ check "mode: a correctly paired report is NOT refused for its mode" \
       "no" \
       "$(case "$same_out" in *"is not a --build report"*) echo "yes: $same_out" ;; *) echo no ;; esac)"
 
+# ---------------------------------------------------------- fixture COVERAGE
+# What the sweep EXCLUDED, and whether the report says so.
+#
+# `repos_total` is not the number of directories the sweep looked at — it is
+# what survived the filters. On the real box: 81 directories, --build judges 71,
+# --smoke judges 61. Until 2026-08-08 the 10 and the 20 left no trace anywhere
+# in the report, while every other exclusion in the same script was announced by
+# name (worktrees, unguarded, no_smoke, without_check). Those two were the
+# biggest and the only silent ones.
+#
+# It matters because coverage shrinks in the direction that looks healthy. A repo
+# that loses its go.mod, or whose only `package main` moves somewhere uncommitted,
+# just leaves the denominator — and `ok: N/N` prints exactly as before with a
+# smaller N. There is no red state to notice.
+#
+# Four directories, one per route out of the sweep, so the identity below has
+# something in every term instead of being satisfied by zeros.
+COV="$ROOT/coverage"
+mkdir -p "$COV"
+
+# make_cov_repo <dir> <go.mod yes|no> <package main yes|no> <smoke port or ->
+make_cov_repo() {
+  local dir="$1" gomod="$2" main="$3" port="$4" base
+  base="$(basename "$dir")"
+  mkdir -p "$dir/scripts"
+  git -C "$dir" init -q .
+  git -C "$dir" config user.email selftest@localhost
+  git -C "$dir" config user.name selftest
+  [ "$gomod" = yes ] && printf 'module %s\n\ngo 1.22\n' "$base" > "$dir/go.mod"
+  if [ "$main" = yes ]; then
+    printf 'package main\n\nfunc main() {}\n' > "$dir/main.go"
+  else
+    printf 'package lib\n' > "$dir/lib.go"
+  fi
+  if [ "$port" != "-" ]; then
+    {
+      echo '#!/usr/bin/env bash'
+      echo "PORT=\"\${E2E_$(echo "$base" | tr 'a-z-' 'A-Z_')_PORT:-$port}\""
+      echo 'echo smoke'
+    } > "$dir/scripts/e2e-smoke.sh"
+    chmod +x "$dir/scripts/e2e-smoke.sh"
+  fi
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm init
+}
+
+make_cov_repo "$COV/covmain" yes yes 19921   # judged by build AND smoke
+make_cov_repo "$COV/covlib"  yes no  -       # go.mod, no main -> smoke excludes it
+make_cov_repo "$COV/covnongo" no no  -       # no go.mod       -> build+smoke exclude it
+git -C "$COV/covmain" worktree add -q --detach "$COV/covwt" HEAD
+
+# identity <report> — directories_scanned minus everything the report accounts
+# for. Zero means every directory left by a route the report names.
+identity() {
+  report_field "$1" \
+    'd["directories_scanned"] - (d["repos_total"] + len(d["worktrees"])
+     + len(d.get("without_go_mod") or []) + len(d.get("without_main_package") or [])
+     + d["skipped_by_only"])'
+}
+
+REPOS_DIR="$COV" REPORT="$ROOT/cov-build.json" bash "$AUDIT" >/dev/null 2>&1
+REPOS_DIR="$COV" REPORT="$ROOT/cov-smoke.json" bash "$AUDIT" --smoke >/dev/null 2>&1
+REPOS_DIR="$COV" REPORT="$ROOT/cov-elf.json"   bash "$AUDIT" --elf   >/dev/null 2>&1
+
+check "coverage: build counts every directory under the root, not just the judged ones" \
+      "4" "$(report_field "$ROOT/cov-build.json" 'd["directories_scanned"]')"
+check "coverage: build judges only the Go repositories" \
+      "2" "$(report_field "$ROOT/cov-build.json" 'd["repos_total"]')"
+# The assertion the whole section exists for. Naming it is what separates "this
+# directory is out of scope" from "this directory silently stopped being covered",
+# and the two are indistinguishable from repos_total alone.
+check "coverage: build NAMES the directory it excluded for having no go.mod" \
+      "covnongo" \
+      "$(report_field "$ROOT/cov-build.json" '",".join(d["without_go_mod"])')"
+check "coverage: the build accounting closes" "0" "$(identity "$ROOT/cov-build.json")"
+
+check "coverage: smoke judges only repositories that ship a main package" \
+      "1" "$(report_field "$ROOT/cov-smoke.json" 'd["repos_total"]')"
+check "coverage: smoke NAMES the Go repository it excluded for shipping no main package" \
+      "covlib" \
+      "$(report_field "$ROOT/cov-smoke.json" '",".join(d["without_main_package"])')"
+check "coverage: smoke still names the non-Go directory too" \
+      "covnongo" \
+      "$(report_field "$ROOT/cov-smoke.json" '",".join(d["without_go_mod"])')"
+check "coverage: the smoke accounting closes" "0" "$(identity "$ROOT/cov-smoke.json")"
+
+# elf filters on nothing but worktrees, so its denominator IS the directory
+# count. Pinned because it is the one mode where the two numbers should agree,
+# and an accounting bug that made every mode agree would otherwise look right.
+check "coverage: elf judges every directory, so its two counts agree" \
+      "3 4" \
+      "$(report_field "$ROOT/cov-elf.json" 'str(d["repos_total"]) + " " + str(d["directories_scanned"])')"
+check "coverage: the elf accounting closes" "0" "$(identity "$ROOT/cov-elf.json")"
+
+# --only is the fourth route out of the sweep, and it has to be counted for the
+# identity to be an invariant rather than a property of full sweeps only. If it
+# were not, the reader could not tell a filtered sweep from a broken one — it
+# would have to rely on the `only` refusal alone, which is a different check.
+REPOS_DIR="$COV" REPORT="$ROOT/cov-only.json" bash "$AUDIT" --only covmain >/dev/null 2>&1
+check "coverage: a filtered sweep counts what the filter excluded" \
+      "2" "$(report_field "$ROOT/cov-only.json" 'd["skipped_by_only"]')"
+check "coverage: the accounting closes for a filtered sweep too" \
+      "0" "$(identity "$ROOT/cov-only.json")"
+
+# --- and now the reader half: an unreconcilable report must be refused. ---
+#
+# Two separate refusals, sabotage-verified separately, because they fail for
+# different reasons and one does not imply the other: a report can carry the
+# accounting keys and still not add up.
+python3 - "$ROOT/cov-build.json" "$ROOT/cov-nokeys.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+del d["directories_scanned"]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+nokeys_out=$(REPORT="$ROOT/cov-nokeys.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)
+nokeys_rc=$?
+check "coverage: the reader refuses a report with no coverage accounting at all" \
+      "1 yes" \
+      "$nokeys_rc $(case "$nokeys_out" in *"no coverage accounting"*) echo yes ;; *) echo "no: $nokeys_out" ;; esac)"
+
+# Drop the excluded directory from the list while leaving the count alone: the
+# exact shape of a sweep that grew a new way to skip something and did not
+# record it. Every other field stays self-consistent, which is why nothing else
+# in the reader catches it.
+python3 - "$ROOT/cov-build.json" "$ROOT/cov-unbalanced.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["without_go_mod"] = []
+json.dump(d, open(sys.argv[2], "w"))
+PY
+unbal_out=$(REPORT="$ROOT/cov-unbalanced.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)
+unbal_rc=$?
+check "coverage: the reader refuses a report whose coverage does not reconcile" \
+      "1 yes" \
+      "$unbal_rc $(case "$unbal_out" in *"does not reconcile"*) echo yes ;; *) echo "no: $unbal_out" ;; esac)"
+
+# And the converse, which is the assertion that keeps the two above honest: a
+# report that DOES reconcile must still pass. A refusal that fires on everything
+# is not a check, and both refusals above are satisfied by a reader that exits 1
+# unconditionally.
+good_out=$(REPORT="$ROOT/cov-build.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)
+good_rc=$?
+check "coverage: a reconciling report is still accepted" \
+      "0 yes" \
+      "$good_rc $(case "$good_out" in ok:*) echo yes ;; *) echo "no: $good_out" ;; esac)"
+# The coverage figure has to reach the line a human reads. The identity proves
+# the numbers add up; it cannot tell that 71 was 72 last night, and only the
+# printed pair makes that visible.
+check "coverage: the reader prints the excluded directories, not just the judged ones" \
+      "yes" \
+      "$(case "$good_out" in *"2 of 4 directories"*) echo yes ;; *) echo "no: $good_out" ;; esac)"
+
 # ------------------------------------------------------ fixture EMPTY SWEEP
 # The sweep does not treat "discovered nothing" as a refusal. An empty repos root
 # exits 0 and writes repos_total=0 with no `aborted` and no `only`, so every check

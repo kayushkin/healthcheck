@@ -550,6 +550,19 @@ check_port_collisions() {
   return 1
 }
 
+# Every directory under the repos root, counted before any filter runs. This is
+# the denominator the coverage accounting below closes against; `repos_total` is
+# what SURVIVED the filters, which is a different and much smaller number.
+#
+# Measured 2026-08-08: 81 directories, of which --build judges 71 and --smoke 61.
+# Before this line the other 10 and 20 left no trace anywhere in the report, so
+# `ok: 71/71 repos build from a clean clone of HEAD` was the whole story a reader
+# ever got — see the exclusion lists at the report writer for why that matters.
+directories_scanned=0
+for path in "$REPOS_DIR"/*/; do
+  directories_scanned=$((directories_scanned + 1))
+done
+
 # Find the linked worktrees once, so every pass skips the same set and the report
 # can name them. A skipped worktree is announced, not swallowed: this guard's
 # whole premise is that a check which quietly does not run is indistinguishable
@@ -743,6 +756,21 @@ no_smoke=0   # smoke mode only: repos with a committed HEAD but no smoke to run
 # names the repos it has no smoke for: an uncovered package that goes unnamed is
 # read as a covered one.
 without_check=()
+# The two exclusions that used to leave no trace at all, and the reason this
+# accounting exists. Every OTHER way a directory leaves this sweep is already
+# announced — a linked worktree is listed in `worktrees`, a directory with no
+# committed HEAD is counted in `unguarded`, a repo with no smoke script is
+# counted in `no_smoke` and named in `without_smoke`. These two were not, and
+# they are the two biggest: 10 of 81 directories carry no go.mod, and a further
+# 10 of the remaining 71 ship no `package main` at HEAD.
+#
+# That mattered because the shrinkage is invisible in the direction that looks
+# healthy. A repo that loses its go.mod, or whose only `package main` moves
+# somewhere the sweep cannot see, drops out of `repos_total` — and `ok: N/N`
+# still prints, one repo smaller and just as green.
+without_go_mod=()        # build + smoke: a directory under the root with no go.mod
+without_main_package=()  # smoke only: a Go repo whose HEAD ships no `package main`
+skipped_by_only=0        # any mode: excluded by --only, so the accounting still closes
 
 if [ "$MODE" = "node" ]; then
   while IFS=$'\t' read -r repo sub; do
@@ -916,7 +944,9 @@ fi
 if [ "$MODE" = "elf" ]; then
   for path in "$REPOS_DIR"/*/; do
     name=$(basename "$path")
-    [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+    if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then
+      skipped_by_only=$((skipped_by_only + 1)); continue
+    fi
     is_linked_worktree "$path" && continue
     total=$((total + 1))
 
@@ -1001,9 +1031,21 @@ repo_dirs=()
 
 for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   name=$(basename "$path")
-  [ -f "$path/go.mod" ] || continue
-  [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+  # Order matters, and it is the accounting that fixes it. A linked worktree is
+  # tested FIRST, because it is not a directory this sweep has an opinion about
+  # at all — it is already named in `worktrees`, and letting it reach the go.mod
+  # test would list a worktree of a non-Go repo in BOTH lists and break the
+  # identity the reader checks.
   is_linked_worktree "$path" && continue
+  if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then
+    skipped_by_only=$((skipped_by_only + 1)); continue
+  fi
+  if [ ! -f "$path/go.mod" ]; then
+    # Not a Go repository, so this sweep has nothing to build. Out of scope, not
+    # a coverage gap — but named, because "out of scope" and "silently stopped
+    # being covered" look identical from the report otherwise.
+    without_go_mod+=("$name"); continue
+  fi
 
   if ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
     # No committed HEAD exists, so there is nothing for this guard to verify.
@@ -1021,7 +1063,16 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
     # boot and it is out of scope — not a coverage gap. Asked of HEAD, not the
     # working tree, and answered without the go toolchain so that the coverage
     # count costs nothing.
-    git -C "$path" grep -qE '^package main$' HEAD -- '*.go' 2>/dev/null || continue
+    #
+    # Named, not dropped. This is the single largest exclusion in any mode of
+    # this sweep — 10 of the 71 Go repos — and until 2026-08-08 the only record
+    # that it had happened was the gap between --build's repos_total and
+    # --smoke's, which nothing compares. A repo whose `package main` moves into
+    # a directory that is not committed leaves the smoke gate here, and the gate
+    # reports one fewer repo passing out of one fewer repo total.
+    if ! git -C "$path" grep -qE '^package main$' HEAD -- '*.go' 2>/dev/null; then
+      without_main_package+=("$name"); continue
+    fi
     total=$((total + 1))
 
     case "$(smoke_status "$path")" in
@@ -1163,6 +1214,10 @@ printf '%s\n' "${results[@]}" |
   TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
   WITHOUT_CHECK="$(printf '%s\n' ${without_check+"${without_check[@]}"})" \
   WORKTREES="$(printf '%s\n' ${linked_worktrees+"${linked_worktrees[@]}"})" \
+  DIRECTORIES_SCANNED="$directories_scanned" \
+  SKIPPED_BY_ONLY="$skipped_by_only" \
+  WITHOUT_GO_MOD="$(printf '%s\n' ${without_go_mod+"${without_go_mod[@]}"})" \
+  WITHOUT_MAIN_PACKAGE="$(printf '%s\n' ${without_main_package+"${without_main_package[@]}"})" \
   REPORT="$REPORT" \
   python3 -c '
 import json, os, sys
@@ -1204,32 +1259,69 @@ report = {
         )
     ],
 }
+if mode != "node":
+    # Coverage accounting. `repos_total` is what survived the filters; this says
+    # what the filters removed, so the two can be reconciled instead of trusted.
+    #
+    # The identity every reader checks:
+    #
+    #   directories_scanned == repos_total
+    #                        + len(worktrees)
+    #                        + len(without_go_mod)          (build, smoke)
+    #                        + len(without_main_package)    (smoke)
+    #                        + skipped_by_only
+    #
+    # It is an identity, not a policy — no judgement about whether an exclusion
+    # is acceptable, only that every directory left by a route somebody wrote
+    # down. If it does not close, a directory vanished through a path that is
+    # not in this list, which is the exact defect this whole family exists to
+    # refuse: coverage that quietly shrank while the verdict stayed green.
+    #
+    # --node is excluded because its unit is a PACKAGE emitted by `git ls-tree`,
+    # not a directory under the root, so there is no directory count to close
+    # against. Its own coverage gap is tracked separately.
+    report["directories_scanned"] = int(os.environ["DIRECTORIES_SCANNED"])
+    report["skipped_by_only"] = int(os.environ["SKIPPED_BY_ONLY"])
+if mode in ("build", "smoke"):
+    # Directories under the repos root that are not Go repositories at all.
+    report["without_go_mod"] = [
+        d for d in os.environ["WITHOUT_GO_MOD"].splitlines() if d.strip()
+    ]
 if mode == "smoke":
     # repos_total counts only repos that BUILD A BINARY — a library has nothing
     # to boot, so counting it would make coverage look worse than it is.
+    #
+    # Which is true, and is exactly why the ones left out have to be named: the
+    # sentence above is a claim about WHICH repos were dropped, and nothing in
+    # the report used to let a reader check it. Now it can.
+    report["without_main_package"] = [
+        d for d in os.environ["WITHOUT_MAIN_PACKAGE"].splitlines() if d.strip()
+    ]
     report["no_smoke"] = int(os.environ["NO_SMOKE"])
     report["without_smoke"] = [r["repo"] for r in rows if r["status"] == "no-smoke"]
-else:
-    if mode == "node":
-        # The unit here is a PACKAGE, not a repo: several repos keep their
-        # frontend in a subdirectory (argraphments/frontend, llm-bridge/ts), and
-        # a repo can hold more than one. Naming the count honestly keeps anyone
-        # from reading it against the 68 repos of the Go pass.
-        # (No apostrophes in this block: it is embedded in a single-quoted shell
-        # string, and a nested quote silently ends it.)
-        report["node_version"] = os.environ["NODE_VERSION"]
-        report["packages_total"] = int(os.environ["TOTAL"])
-        report["unguarded_packages"] = [r["repo"] for r in rows if r["status"] == "unguarded"]
-        # Packages that installed and built but declare no `check` script, so
-        # this sweep executed no assertion about how they behave. Listed, not
-        # counted as a failure: declaring one is how a package opts in, and a
-        # guard that is red from day one is a guard people learn to ignore.
-        report["without_check"] = [
-            p for p in os.environ["WITHOUT_CHECK"].splitlines() if p.strip()
-        ]
-    elif mode == "build":
-        report["with_tests"] = os.environ["WITH_TESTS"] == "1"
-    # elf carries no extra keys: it neither runs tests nor a toolchain.
+if mode == "node":
+    # The unit here is a PACKAGE, not a repo: several repos keep their
+    # frontend in a subdirectory (argraphments/frontend, llm-bridge/ts), and
+    # a repo can hold more than one. Naming the count honestly keeps anyone
+    # from reading it against the 68 repos of the Go pass.
+    # (No apostrophes in this block: it is embedded in a single-quoted shell
+    # string, and a nested quote silently ends it.)
+    report["node_version"] = os.environ["NODE_VERSION"]
+    report["packages_total"] = int(os.environ["TOTAL"])
+    report["unguarded_packages"] = [r["repo"] for r in rows if r["status"] == "unguarded"]
+    # Packages that installed and built but declare no `check` script, so
+    # this sweep executed no assertion about how they behave. Listed, not
+    # counted as a failure: declaring one is how a package opts in, and a
+    # guard that is red from day one is a guard people learn to ignore.
+    report["without_check"] = [
+        p for p in os.environ["WITHOUT_CHECK"].splitlines() if p.strip()
+    ]
+elif mode == "build":
+    report["with_tests"] = os.environ["WITH_TESTS"] == "1"
+# elf carries no extra keys of its own: it neither runs tests nor a toolchain.
+if mode != "smoke":
+    # smoke counts coverage with no_smoke instead: a repo it cannot boot is
+    # named there, and there is no separate unguarded tally to print.
     report["unguarded"] = int(os.environ["UNGUARDED"])
 with open(os.environ["REPORT"], "w") as fh:
     json.dump(report, fh, indent=2)
