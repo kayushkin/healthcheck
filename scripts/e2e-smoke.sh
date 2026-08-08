@@ -13,15 +13,35 @@
 # WHY THE THROWAWAY CONFIG IS THE WHOLE SAFETY STORY
 # --------------------------------------------------
 # healthcheck's day job is to restart failing systemd units. Booting it against
-# the real config.yaml would point a second, unsupervised checker at 30 live
-# units with auto_restart armed. The smoke therefore writes its own config
-# containing ONLY self-contained checks: no systemd, no auto_restart, no NATS,
-# nothing that can reach a real service.
+# the real config.yaml would point a second, unsupervised checker at every unit
+# that file names, and every one of them has auto_restart armed (32 of 32,
+# counted 2026-08-08). The smoke therefore writes its own config containing ONLY
+# self-contained checks: no systemd, no auto_restart, no NATS, nothing that can
+# reach a real service.
 #
-# And deliberately NO systemd check, even a harmless one: `systemctl --user`
-# needs XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS, which the scheduler's unit
-# does not set, so such a check would pass by hand and behave differently at
-# 03:00. A guard that is red only at night is a guard people learn to ignore.
+# And deliberately NO systemd check, NOT EVEN A HARMLESS-LOOKING ONE — because
+# there is no such thing. `checkService` sets EnabledState for every check of
+# type `systemd`, and the branch below it,
+#
+#     if svc.Type == "systemd" && enabledState == "disabled" { go c.ensureEnabled(svc) }
+#
+# runs `systemctl --user enable <unit>` on the real box. That branch is gated on
+# NOTHING else: not auto_restart, not recovery_command, not AlertThreshold, not
+# even the misconfigured check that suppresses auto-restart. A systemd check with
+# no auto_restart and no recovery_command still writes a symlink into
+# ~/.config/systemd/user/default.target.wants/ within one check_interval.
+# Measured, not reasoned about: a throwaway unit reading `disabled` came back
+# `enabled` three seconds after such a config booted, with `auto-enabled` in the
+# log. So "no auto_restart" is NOT what makes a systemd check safe here, and the
+# only safe number of systemd checks in this config is zero.
+#
+# ⚠️ This paragraph used to give a different and FALSE reason — that
+# `systemctl --user` needs XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS "which
+# the scheduler's unit does not set", so a systemd check would behave differently
+# at 03:00. A scheduler shell job gets both variables and answers
+# `systemctl --user is-active` fine; measured 2026-08-08. It is recorded here
+# because disproving that reason looks like clearance to add "just one harmless
+# systemd check", which is exactly the edit this paragraph exists to prevent.
 #
 # Tunables:
 #   E2E_PORT   — listen port (default 19105)
@@ -76,6 +96,10 @@ step "write a throwaway config (no systemd, no auto_restart, no NATS)"
 # run. Nothing can be recovered from either way: auto-restart only fires for a
 # `systemd` check with auto_restart set, and recovery only for a check with a
 # recovery_command. This config has neither, by construction.
+#
+# Recovery is not the only thing healthcheck does to the box, though — auto-enable
+# is ungated (see the header). What keeps this config inert is that it declares no
+# `systemd` check at all, which the assertion after the heredoc enforces.
 cat >"$TMP_DIR/config.yaml" <<EOF
 check_interval: 1s
 alert_threshold: 2
@@ -115,6 +139,17 @@ resources:
     path: "$TMP_DIR"
     threshold: 99.9
 EOF
+
+step "assert the throwaway config declares no systemd check"
+# The header argues at length that zero is the only safe number of systemd checks
+# here, because auto-enable runs `systemctl --user enable` on the real box and is
+# gated on nothing. An argument in a comment does not survive an edit; this does.
+# Refuse to boot rather than let a future one-line addition point an unsupervised
+# checker at a live unit.
+if grep -Eq '^[[:space:]]*type:[[:space:]]*"?systemd"?[[:space:]]*$' "$TMP_DIR/config.yaml"; then
+  fail "the throwaway config declares a systemd check — healthcheck would run \`systemctl --user enable\` on a real unit (auto-enable is NOT gated on auto_restart; see the header)"
+fi
+echo "    0 systemd checks"
 
 step "launch healthcheck on $BASE"
 "$TMP_DIR/healthcheck" -config "$TMP_DIR/config.yaml" >"$TMP_DIR/server.log" 2>&1 &
