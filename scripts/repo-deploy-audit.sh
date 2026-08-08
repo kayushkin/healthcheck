@@ -407,14 +407,60 @@ done <<<"$candidates"
 # mislead the next audit and the next human, so name them by path.
 #
 # Keyed on the main package (column 3), never the repo: a repo that ships ten
-# commands is not ten ghosts of itself.
+# commands is not ten ghosts of itself. That reasoning is right and is kept.
+#
+# ⚠️ But the main package is not always an identity, and for six months this
+# read one particular non-identity as though it were. A binary built from an
+# explicit file list (`go build a.go b.go`) carries no main package at all, and
+# Go stamps the literal `command-line-arguments` in its place. That string is
+# the ABSENCE of an identity, and every file-list-built binary on the box wears
+# it. Keyed on directly, all of them collapse into one command, so a single
+# running one turned every unrelated idle one into its ghost.
+#
+# Measured on the live fleet 2026-08-08, before this fix: 11 ghosts reported, of
+# which `/usr/local/bin/mangastack-bin` and `/usr/local/bin/podcaststack-bin`
+# were named as idle decoy copies of the running `~/bin/kayushkin-server`. They
+# are three different programs — mangastack.go, podcaststack.go and the
+# kayushkin.com server — sharing nothing but the placeholder.
+#
+# The fix is a substitute identity, not an exclusion, because one of those three
+# WAS a genuine ghost: `/usr/local/bin/kayushkin-server` really is an idle copy
+# of the running one, and dropping file-list binaries from the check wholesale
+# would have thrown that true finding away with the two false ones. When Go
+# recorded no main package, the deployed filename is the only identity left —
+# and it is the identity a human is already using when they ask whether the same
+# command sits in two places. It is strictly narrower than the placeholder: it
+# separates mangastack-bin from podcaststack-bin while still matching
+# kayushkin-server to kayushkin-server.
+#
+# The substitution is NAMED in the report (`ghost_identity_from_filename`), not
+# applied silently, for the same reason `skipped_not_go` is named: a weaker
+# identity being used for an artifact is exactly the kind of thing that should
+# be visible when the next reader wonders why a ghost was or was not reported.
 ghosts="$(
   printf '%s' "$rows" | awk -F'\t' '
+    function identity(main_pkg, artifact,   seg, n) {
+      # `?` is what the no-module row writes when even the placeholder is absent.
+      if (main_pkg != "command-line-arguments" && main_pkg != "" && main_pkg != "?")
+        return main_pkg
+      n = split(artifact, seg, "/")
+      return "file-list:" seg[n]
+    }
     NF {
-      copies[$3]++
-      if ($4 == "true") { runs[$3] = 1 } else { idle[$3] = idle[$3] $2 "\n" }
+      key = identity($3, $2)
+      copies[key]++
+      if ($4 == "true") { runs[key] = 1 } else { idle[key] = idle[key] $2 "\n" }
     }
     END { for (pkg in runs) if (copies[pkg] > 1) printf "%s", idle[pkg] }
+  ' | sort -u
+)"
+
+# The escape hatch, counted and named rather than merely taken — the rule this
+# guard already applies to `skipped_not_go`. These are the artifacts whose ghost
+# identity came from their filename because Go recorded no main package for them.
+ghost_identity_from_filename="$(
+  printf '%s' "$rows" | awk -F'\t' '
+    NF && ($3 == "command-line-arguments" || $3 == "" || $3 == "?") { print $2 }
   ' | sort -u
 )"
 
@@ -483,6 +529,7 @@ done
 finished_epoch="$(date +%s)"
 
 DRIFT_ROWS="$rows" WIP_ROWS="$wip_rows" GHOSTS="$ghosts" \
+GHOST_IDENTITY_FROM_FILENAME="$ghost_identity_from_filename" \
 STARTED_AT="$started_at" \
 MAX_BEHIND="$MAX_BEHIND" MAX_BEHIND_DAYS="$MAX_BEHIND_DAYS" STALE_WIP_HOURS="$STALE_WIP_HOURS" \
 DRIFT_FAIL="$drift_fail" WIP_FAIL="$wip_fail" REPORT="$REPORT" \
@@ -521,6 +568,13 @@ ghosts = [g.strip() for g in os.environ.get("GHOSTS", "").splitlines() if g.stri
 # with a space in it must stay one entry.
 skipped_not_go = [s.strip() for s in os.environ.get("SKIPPED_NOT_GO", "").splitlines() if s.strip()]
 
+# Same line-splitting rule again, same reason: these are paths.
+ghost_identity_from_filename = [
+    g.strip()
+    for g in os.environ.get("GHOST_IDENTITY_FROM_FILENAME", "").splitlines()
+    if g.strip()
+]
+
 report = {
     "mode": "deploy",
     "generated_at": os.environ["STARTED_AT"],
@@ -547,6 +601,14 @@ report = {
     "stale_running": [d for d in drift if d["running"] and d["status"] in ("stale", "orphan-rev", "no-vcs", "no-module")],
     "behind": [d for d in drift if d["status"] in ("behind", "stale")],
     "ghost_artifacts": ghosts,
+    # Artifacts whose ghost identity had to be taken from their filename because
+    # Go recorded no main package for them. Named so the weaker identity is
+    # visible; no reader refuses a report for lacking this key, deliberately —
+    # the live fleet report is written by a nightly job, and a refusal added here
+    # would silence the real findings this guard already makes, until that job
+    # next runs. (No apostrophes in this block: it is a single-quoted shell
+    # string, and the header says so 500 lines above where you are reading.)
+    "ghost_identity_from_filename": ghost_identity_from_filename,
     "stale_wip": [w for w in wip if w["status"] == "stale-wip"],
     "artifacts": drift,
     "worktrees": wip,

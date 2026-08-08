@@ -680,6 +680,285 @@ else
   echo "SKIP  deploy coverage fixture (no go toolchain)"
 fi
 
+# --------------------------------------------- fixture DEPLOY STATUS BRANCHES
+# The deploy sweep sorts every Go artifact into one of seven statuses:
+#
+#     ok · behind · stale · unmapped · orphan-rev · no-vcs · no-module
+#
+# and until now not one of them had a case. That table is the entire opinion
+# this guard holds — it is what decides whether the binaries actually serving
+# traffic match committed source — and the reason it matters is on the record:
+# `no-module` had to be ADDED because the empty-buildinfo path was silently
+# mis-routing ~/bin/kayushkin-server, the binary serving the live site, for the
+# whole life of the script. No test would have caught that, and no test would
+# catch the next one.
+#
+# ⚠️ A PRIOR MEASUREMENT SAID THIS SECTION COULD NOT BE WRITTEN, and it was
+# wrong in a way worth recording. The fourteenth pass measured that the sweep
+# reads `running_bins` from /proc unconditionally and concluded that any case
+# pinning "a running artifact fails, the same one idle does not" would have to
+# work around it, which is why it stopped at the abort path. /proc genuinely
+# cannot be redirected — but it does not need to be. A fixture binary can simply
+# be RUN, and then /proc reports the truth about it. That is better than a mock:
+# it exercises the real readlink-over-/proc path rather than a substitute for
+# it. The one requirement is that the fixture bin directory match the sweep
+# candidate filter (`*/bin/*`), which "$DBR/bin" does.
+#
+# ⚠️ ABSOLUTE COUNTS ARE NOT ASSERTED, for the reason the coverage fixture above
+# states at length: the candidate list is BIN_DIRS plus the exe of every running
+# process, so the totals move between two runs seconds apart. Every check below
+# pins the STATUS OF A NAMED FIXTURE ARTIFACT, which is deterministic, and the
+# ghost checks pin membership restricted to fixture paths. If you find yourself
+# wanting to assert a number here, read that comment first.
+if [ -n "$DEPLOY_GO" ]; then
+  DBR="$ROOT/deploybranch"
+  mkdir -p "$DBR/bin" "$DBR/altbin" "$DBR/repos" "$DBR/staging"
+  DBR_PIDS=()
+  # Sleeping fixture processes must not outlive the run, including when it is
+  # interrupted. The EXIT trap already removes ROOT; this extends it rather than
+  # replacing it, because losing the temp-dir cleanup to gain this one would be
+  # a poor trade.
+  trap 'kill ${DBR_PIDS[*]:-} 2>/dev/null; rm -rf "$ROOT"' EXIT
+
+  # dbr_repo <dir> <module> <body>  — a committed Go main package.
+  dbr_repo() {
+    local dir="$1" mod="$2" body="$3"
+    mkdir -p "$dir"
+    git -C "$dir" init -q .
+    git -C "$dir" config user.email selftest@localhost
+    git -C "$dir" config user.name selftest
+    printf 'module %s\n\ngo 1.22\n' "$mod" > "$dir/go.mod"
+    printf '%s' "$body" > "$dir/main.go"
+    git -C "$dir" add -A
+    git -C "$dir" commit -qm init
+  }
+  DBR_NOOP='package main
+
+func main() {}
+'
+  # Sleeps far longer than a sweep takes, so the process is unambiguously alive
+  # for the whole run and the kill is what ends it, not a race with its exit.
+  DBR_SLEEP='package main
+
+import "time"
+
+func main() { time.Sleep(600 * time.Second) }
+'
+  dbr_build() {  # dbr_build <repo dir> <output> [extra go flags...]
+    local dir="$1" out="$2"; shift 2
+    ( PATH="$DEPLOY_GO:$PATH"; cd "$dir" && go build "$@" -o "$out" . ) >/dev/null 2>&1
+  }
+
+  # --- ok: built from HEAD, nothing since.
+  dbr_repo "$DBR/repos/dbrok" dbrok "$DBR_NOOP"
+  dbr_build "$DBR/repos/dbrok" "$DBR/bin/dbrok"
+
+  # --- behind / stale: the SAME shape, differing only in how far back the
+  # build commit is. Both thresholds are passed explicitly below so the pair
+  # pins the boundary itself (`behind >= MAX_BEHIND` promotes to stale) rather
+  # than whatever the default happens to be this month.
+  dbr_repo "$DBR/repos/dbrbehind" dbrbehind "$DBR_NOOP"
+  dbr_build "$DBR/repos/dbrbehind" "$DBR/bin/dbrbehind"
+  for dbr_n in 1 2; do
+    printf '\n// %s\n' "$dbr_n" >> "$DBR/repos/dbrbehind/main.go"
+    git -C "$DBR/repos/dbrbehind" commit -qam "c$dbr_n"
+  done
+  dbr_repo "$DBR/repos/dbrstale" dbrstale "$DBR_NOOP"
+  dbr_build "$DBR/repos/dbrstale" "$DBR/bin/dbrstale"
+  for dbr_n in 1 2 3; do
+    printf '\n// %s\n' "$dbr_n" >> "$DBR/repos/dbrstale/main.go"
+    git -C "$DBR/repos/dbrstale" commit -qam "c$dbr_n"
+  done
+
+  # --- no-vcs: -buildvcs=false, so Go stamps a module but no revision.
+  dbr_repo "$DBR/repos/dbrnovcs" dbrnovcs "$DBR_NOOP"
+  dbr_build "$DBR/repos/dbrnovcs" "$DBR/bin/dbrnovcs" -buildvcs=false
+
+  # --- unmapped: a real module whose last segment names no directory under the
+  # repos root. Built from staging/, which REPOS_DIR does not point at.
+  dbr_repo "$DBR/staging/dbrnorepo" dbrnorepo "$DBR_NOOP"
+  dbr_build "$DBR/staging/dbrnorepo" "$DBR/bin/dbrnorepo"
+
+  # --- orphan-rev: the binary names a commit this repo does not contain. Built
+  # in staging and then matched against a SEPARATE repo of the same module name,
+  # rather than by rewriting history — a reset leaves the old commit dangling in
+  # the object database, where `cat-file -e` still finds it, and the case would
+  # silently become an `ok`.
+  #
+  # ⚠️ THE TWO REPOS MUST DIFFER IN CONTENT. A git commit hash is a pure
+  # function of tree, author, message and timestamp, and `dbr_repo` fixes all
+  # four — so two repos built from the same body in the same second get the
+  # SAME commit hash, the revision is found, and this case quietly passes
+  # through the `ok` branch instead. That is not hypothetical: the first draft
+  # of this fixture did exactly that and reported `ok`. The differing comment
+  # below is load-bearing; do not tidy it away.
+  dbr_repo "$DBR/staging/dbrorphan" dbrorphan "// built elsewhere, never committed here
+$DBR_NOOP"
+  dbr_build "$DBR/staging/dbrorphan" "$DBR/bin/dbrorphan"
+  dbr_repo "$DBR/repos/dbrorphan" dbrorphan "$DBR_NOOP"
+
+  # --- no-module: built from an explicit file list, so Go records no module at
+  # all and writes the literal `command-line-arguments` as the main package.
+  mkdir -p "$DBR/filelist"
+  printf '%s' "$DBR_NOOP" > "$DBR/filelist/main.go"
+  ( PATH="$DEPLOY_GO:$PATH"; cd "$DBR/filelist" \
+      && GO111MODULE=off go build -o "$DBR/bin/dbrnomod" main.go ) >/dev/null 2>&1
+
+  # --- the running pair, and the ghost fixtures.
+  #
+  # dbrrun is no-vcs AND running; dbrnovcs above is no-vcs and idle. Same
+  # status, opposite gating — which is the whole point of the pair, and neither
+  # half proves anything alone.
+  dbr_repo "$DBR/repos/dbrrun" dbrrun "$DBR_SLEEP"
+  dbr_build "$DBR/repos/dbrrun" "$DBR/bin/dbrrun" -buildvcs=false
+  # A second copy of the same main package at a different path: the idle decoy
+  # the ghost check exists to name.
+  dbr_build "$DBR/repos/dbrrun" "$DBR/altbin/dbrrun-ghost" -buildvcs=false
+
+  # One repo shipping two DIFFERENT commands, one running and one idle. This is
+  # the negative the ghost rule was written for — "a repo that ships ten
+  # commands is not ten ghosts of itself" — and it had lived its whole life as a
+  # comment with nothing testing it.
+  mkdir -p "$DBR/repos/dbrmulti/cmd/alpha" "$DBR/repos/dbrmulti/cmd/beta"
+  git -C "$DBR/repos/dbrmulti" init -q .
+  git -C "$DBR/repos/dbrmulti" config user.email selftest@localhost
+  git -C "$DBR/repos/dbrmulti" config user.name selftest
+  printf 'module dbrmulti\n\ngo 1.22\n' > "$DBR/repos/dbrmulti/go.mod"
+  printf '%s' "$DBR_SLEEP" > "$DBR/repos/dbrmulti/cmd/alpha/main.go"
+  printf '%s' "$DBR_NOOP"  > "$DBR/repos/dbrmulti/cmd/beta/main.go"
+  git -C "$DBR/repos/dbrmulti" add -A
+  git -C "$DBR/repos/dbrmulti" commit -qm init
+  ( PATH="$DEPLOY_GO:$PATH"; cd "$DBR/repos/dbrmulti" \
+      && go build -buildvcs=false -o "$DBR/bin/dbralpha" ./cmd/alpha \
+      && go build -buildvcs=false -o "$DBR/bin/dbrbeta"  ./cmd/beta ) >/dev/null 2>&1
+
+  # Two UNRELATED file-list binaries, one running, plus a same-named copy of the
+  # running one. This is the regression fixture for the defect found while
+  # writing this section: `command-line-arguments` is not a main package, it is
+  # the placeholder Go writes when there is none, so keying ghost detection on
+  # it collapsed every file-list binary on the box into a single command.
+  # Measured on the live fleet before the fix — 11 ghosts reported, two of them
+  # (`mangastack-bin`, `podcaststack-bin`) named as idle copies of the running
+  # `kayushkin-server`, which they have nothing to do with.
+  mkdir -p "$DBR/filelist-run" "$DBR/filelist-other"
+  printf '%s' "$DBR_SLEEP" > "$DBR/filelist-run/main.go"
+  printf '%s' "$DBR_NOOP"  > "$DBR/filelist-other/main.go"
+  ( PATH="$DEPLOY_GO:$PATH"; cd "$DBR/filelist-run" \
+      && GO111MODULE=off go build -o "$DBR/bin/dbrflrun" main.go \
+      && GO111MODULE=off go build -o "$DBR/altbin/dbrflrun" main.go ) >/dev/null 2>&1
+  ( PATH="$DEPLOY_GO:$PATH"; cd "$DBR/filelist-other" \
+      && GO111MODULE=off go build -o "$DBR/bin/dbrflother" main.go ) >/dev/null 2>&1
+
+  "$DBR/bin/dbrrun"    & DBR_PIDS+=($!)
+  "$DBR/bin/dbralpha"  & DBR_PIDS+=($!)
+  "$DBR/bin/dbrflrun"  & DBR_PIDS+=($!)
+
+  # The sweep reads /proc once, at startup, and every "running" assertion below
+  # is worthless if it looks before these three have exec'd — the running half
+  # of each pair silently becomes the idle half and the checks pass for the
+  # wrong reason.
+  #
+  # ⚠️ This started life as `sleep 1` with a comment calling it load-bearing.
+  # Sabotage said otherwise: deleting the sleep reddened NOTHING, because bash
+  # takes longer to start the sweep than the kernel takes to exec three
+  # binaries. The comment was an unverified claim, which is the expensive kind —
+  # the next reader disproves it and reads that as permission to delete the
+  # guard. So it is replaced by a precondition that is actually checked: wait
+  # for /proc to agree, and then ASSERT it did. A timing hope becomes a fact the
+  # run can fail on, and the failure names the cause instead of appearing as
+  # three unrelated status mysteries.
+  dbr_seen=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    dbr_seen=0
+    for dbr_pid in "${DBR_PIDS[@]}"; do
+      case "$(readlink -f "/proc/$dbr_pid/exe" 2>/dev/null)" in
+        "$DBR"/*) dbr_seen=$((dbr_seen + 1)) ;;
+      esac
+    done
+    [ "$dbr_seen" -eq 3 ] && break
+    sleep 0.2
+  done
+  check "deploy branches: the three fixture processes are visible in /proc before the sweep" \
+        "3" "$dbr_seen"
+
+  REPOS_DIR="$DBR/repos" BIN_DIRS="$DBR/bin $DBR/altbin" REPORT="$ROOT/dbr.json" \
+    MAX_BEHIND=3 MAX_BEHIND_DAYS=3650 \
+    bash "$DEPLOY_AUDIT" >/dev/null 2>&1
+
+  # dbr_status <artifact basename> — the status the sweep gave one fixture
+  # artifact, or `absent` if it never appeared. Never `report_field`: that
+  # helper sends errors to /dev/null, so a missing key or a bad expression
+  # prints an empty string that reads exactly like a legitimate empty answer.
+  # Both traps are already recorded elsewhere in this file; this avoids them by
+  # answering a definite word in every case.
+  dbr_status() {
+    python3 - "$ROOT/dbr.json" "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+hits = [a["status"] for a in d["artifacts"]
+        if a["artifact"].rsplit("/", 1)[-1] == sys.argv[2] and "/deploybranch/" in a["artifact"]]
+print(hits[0] if len(hits) == 1 else ("absent" if not hits else "ambiguous:%d" % len(hits)))
+PY
+  }
+  # Membership in a report list, restricted to fixture paths and answering yes/no.
+  dbr_in() {  # dbr_in <report key> <artifact basename>
+    python3 - "$ROOT/dbr.json" "$1" "$2" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+entries = d[sys.argv[2]]
+names = [(e["artifact"] if isinstance(e, dict) else e) for e in entries]
+print("yes" if any(n.rsplit("/", 1)[-1] == sys.argv[3] and "/deploybranch/" in n
+                   for n in names) else "no")
+PY
+  }
+
+  check "deploy branches: a binary built from HEAD is ok" \
+        "ok" "$(dbr_status dbrok)"
+  check "deploy branches: 2 commits past the build, under the threshold, is behind" \
+        "behind" "$(dbr_status dbrbehind)"
+  check "deploy branches: 3 commits past the build, at the threshold, is stale" \
+        "stale" "$(dbr_status dbrstale)"
+  check "deploy branches: a binary with no vcs.revision is no-vcs" \
+        "no-vcs" "$(dbr_status dbrnovcs)"
+  check "deploy branches: a module naming no repo under the root is unmapped" \
+        "unmapped" "$(dbr_status dbrnorepo)"
+  check "deploy branches: a revision absent from the repo is orphan-rev" \
+        "orphan-rev" "$(dbr_status dbrorphan)"
+  check "deploy branches: a file-list build carrying no module is no-module" \
+        "no-module" "$(dbr_status dbrnomod)"
+
+  # The gating pair. Same status, one running and one not — the distinction the
+  # whole gate turns on, and the half a status-only assertion cannot see.
+  check "deploy branches: a RUNNING no-vcs artifact is a drift failure" \
+        "yes" "$(dbr_in stale_running dbrrun)"
+  check "deploy branches: the same status IDLE is not a drift failure" \
+        "no" "$(dbr_in stale_running dbrnovcs)"
+
+  # Ghosts.
+  check "deploy branches: an idle copy of a running command is named a ghost" \
+        "yes" "$(dbr_in ghost_artifacts dbrrun-ghost)"
+  check "deploy branches: a repo shipping two commands is not a ghost of itself" \
+        "no" "$(dbr_in ghost_artifacts dbrbeta)"
+  check "deploy branches: an unrelated file-list binary is not a ghost of a running one" \
+        "no" "$(dbr_in ghost_artifacts dbrflother)"
+  # The converse, so the check above cannot pass by dropping file-list binaries
+  # from ghost detection altogether. That was the tempting fix and it would have
+  # thrown away a true finding on this box: /usr/local/bin/kayushkin-server
+  # really IS an idle copy of the running one.
+  check "deploy branches: a same-named idle file-list copy IS still a ghost" \
+        "yes" "$(dbr_in ghost_artifacts dbrflrun)"
+  check "deploy branches: artifacts given a filename identity are named in the report" \
+        "yes" "$(dbr_in ghost_identity_from_filename dbrnomod)"
+  check "deploy branches: an artifact with a real main package is not named there" \
+        "no" "$(dbr_in ghost_identity_from_filename dbrok)"
+
+  kill "${DBR_PIDS[@]}" 2>/dev/null
+  wait "${DBR_PIDS[@]}" 2>/dev/null
+  DBR_PIDS=()
+else
+  echo "SKIP  deploy status branch fixture (no go toolchain)"
+fi
+
 # ------------------------------------------------------ fixture EMPTY SWEEP
 # The sweep does not treat "discovered nothing" as a refusal. An empty repos root
 # exits 0 and writes repos_total=0 with no `aborted` and no `only`, so every check
