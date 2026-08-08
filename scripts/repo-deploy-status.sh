@@ -63,12 +63,17 @@ if stale:
     # No single quotes in this block: it is embedded in a single-quoted shell
     # string, and a nested one silently ends it.
     worst = sorted(stale, key=lambda a: -a.get("behind", 0))[:4]
-    named = ", ".join(
-        [a.get("repo", "?") + " (" + str(a.get("behind", 0)) + " behind)"
-         if a.get("status") not in ("orphan-rev", "no-vcs")
-         else a.get("repo", "?") + " (" + a.get("status", "?") + ")"
-         for a in worst]
-    )
+
+    def label(a):
+        # A no-module artifact has no repo to name — that is the whole finding —
+        # so name the artifact, which is also the thing you go and fix.
+        if a.get("status") == "no-module":
+            return os.path.basename(a.get("artifact", "?")) + " (no-module)"
+        if a.get("status") in ("orphan-rev", "no-vcs"):
+            return a.get("repo", "?") + " (" + a.get("status", "?") + ")"
+        return a.get("repo", "?") + " (" + str(a.get("behind", 0)) + " behind)"
+
+    named = ", ".join([label(a) for a in worst])
     more = "" if len(stale) <= 4 else f" +{len(stale) - 4} more"
     problems.append(
         f"{len(stale)} RUNNING binaries are stale vs their committed HEAD: {named}{more}"

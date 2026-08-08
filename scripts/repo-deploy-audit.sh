@@ -46,6 +46,27 @@
 # That false lead cost real time during the incident this script came out of.
 # The embedded module path cannot lie that way.
 #
+# What it CAN do is not be there at all, and that is the hole this script had
+# for its whole life. `go build main.go sheets.go calendar.go` — a file list
+# rather than a package — stamps the binary `path command-line-arguments` and
+# writes no `mod` line and no vcs stamps. This script read "no mod line" as
+# "not a Go binary" and skipped it in silence.
+#
+# Measured 2026-08-08: 4 such binaries were deployed on this box and 1 was
+# RUNNING — ~/bin/kayushkin-server, the process answering the live site. It
+# appeared in no report, in no count, and in no failure, and it had never once
+# been checked for drift. Every other guard was green, so nothing anywhere
+# suggested the live site's binary was unaudited.
+#
+# Two defects in series produced it, both now fixed in kayushkin.com: deploy.sh
+# built a file list (so no module was stamped), and go.mod said `module gohome`,
+# whose last segment matches no directory under ~/repos — so even a correctly
+# stamped binary would have landed in `unmapped`, which is also not gated. The
+# repair went in the package, not here; this script's own job was to stop
+# calling an unidentifiable Go binary "not a Go binary". It now reports those as
+# `no-module` and fails on them when they are running, exactly as it already did
+# for `no-vcs`.
+#
 # What counts as deployed
 # -----------------------
 # Two populations, and the difference matters:
@@ -168,14 +189,24 @@ repo_has_active_session() {
 # ---------------------------------------------------------------------------
 
 # artifact_meta <path> → "modpath<TAB>mainpkg<TAB>revision<TAB>modified",
-# empty if not Go. mainpkg is what tells two commands of one module apart.
+# empty ONLY when the file is not a Go binary at all. mainpkg is what tells two
+# commands of one module apart.
+#
+# modpath comes back EMPTY for a Go binary built from a file list
+# (`go build a.go b.go`): Go stamps those `path command-line-arguments` and
+# emits no `mod` line and no vcs stamps. That is a real, deployed Go binary we
+# cannot identify — not a non-Go file — so it must be reported, never dropped.
+# Keying "is this Go?" on the module line conflated the two and silently
+# excluded ~/bin/kayushkin-server, the binary serving the live site, from every
+# drift check this script performs. `seen` keys on the output existing instead.
 artifact_meta() {
   go version -m "$1" 2>/dev/null | awk '
+    { seen = 1 }
     $1 == "path"  { main_pkg = $2 }
     $1 == "mod"   { mod = $2 }
     $1 == "build" && $2 ~ /^vcs\.revision=/ { rev = substr($2, 14) }
     $1 == "build" && $2 ~ /^vcs\.modified=/ { mod_dirty = substr($2, 14) }
-    END { if (mod != "") printf "%s\t%s\t%s\t%s", mod, main_pkg, rev, mod_dirty }
+    END { if (seen) printf "%s\t%s\t%s\t%s", mod, main_pkg, rev, mod_dirty }
   '
 }
 
@@ -212,16 +243,28 @@ drift_fail=0
 while IFS= read -r bin; do
   [ -z "$bin" ] && continue
   meta="$(artifact_meta "$bin")"
-  [ -z "$meta" ] && continue   # not a Go binary — nothing to compare
+  [ -z "$meta" ] && continue   # not a Go binary at all — nothing to compare
 
   modpath="$(printf '%s' "$meta" | cut -f1)"
   main_pkg="$(printf '%s' "$meta" | cut -f2)"
   rev="$(printf '%s' "$meta" | cut -f3)"
   dirty="$(printf '%s' "$meta" | cut -f4)"
 
+  running=false; is_running "$bin" && running=true
+
+  if [ -z "$modpath" ]; then
+    # A Go binary carrying no module path: built from an explicit file list, so
+    # Go recorded neither where it came from nor which commit it was. Every
+    # check below needs the module to find the repo, so none of them can run.
+    # Reported and gated exactly like no-vcs, which is the same failure — we
+    # cannot verify what is running — one step further along.
+    rows="$rows-	$bin	${main_pkg:-?}	$running	no-module	0	$dirty	built from a file list (go build a.go b.go), so it carries no module path and no vcs.revision — cannot verify what it was built from"$'\n'
+    [ "$running" = true ] && drift_fail=$((drift_fail + 1))
+    continue
+  fi
+
   repo="${modpath##*/}"
   repo_path="$REPOS_DIR/$repo"
-  running=false; is_running "$bin" && running=true
 
   if [ ! -d "$repo_path/.git" ]; then
     rows="$rows$repo	$bin	$main_pkg	$running	unmapped	0	$dirty	no repo at $repo_path for module $modpath"$'\n'
@@ -388,7 +431,7 @@ report = {
     "wip_failures": int(os.environ["WIP_FAIL"]),
     # A stale artifact that is RUNNING is the real finding; an idle one on disk
     # is only a nuisance, so the gate keys on running.
-    "stale_running": [d for d in drift if d["running"] and d["status"] in ("stale", "orphan-rev", "no-vcs")],
+    "stale_running": [d for d in drift if d["running"] and d["status"] in ("stale", "orphan-rev", "no-vcs", "no-module")],
     "behind": [d for d in drift if d["status"] in ("behind", "stale")],
     "ghost_artifacts": ghosts,
     "stale_wip": [w for w in wip if w["status"] == "stale-wip"],
