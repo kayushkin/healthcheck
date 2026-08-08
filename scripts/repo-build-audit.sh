@@ -29,10 +29,30 @@
 #   go vet ./...     type-checks the TEST tree too, without executing it
 #
 # `go test ./...` is NOT part of the nightly gate (pass --with-tests to add it).
-# vet already compiles test files, which is what catches this bug class; several
-# repos' suites need live services or credentials, so gating on them would make
-# the guard cry wolf nightly — and a guard everyone has learned to ignore is
-# worse than no guard at all.
+# vet already compiles test files, which is what catches this bug class.
+#
+# ⚠️ The second half of that rationale used to read "several repos' suites need
+# live services or credentials, so gating on them would make the guard cry wolf
+# nightly". That claim was never measured, and on 2026-08-08 it was, by running
+# this guard with --with-tests across the whole fleet. It is FALSE:
+#
+#   70 of 71 repos pass `go test ./...` from a clean clone of HEAD (430s total).
+#
+# Not one suite needs a live service or a credential. Every candidate turned out
+# to be a t.Skip on the unset env var (inber/agent, inber/conversation), a
+# //go:build integration tag that `go test ./...` never selects at all
+# (llm-bridge-hermes), an httptest fake, a port number asserted as a string
+# literal (forge, permission-store, redact), or a test written to tolerate the
+# service being absent (inber/server TestEventPublisherCreation).
+#
+# The single red is argraphments, and it is a TRUE defect, not a wolf: three
+# tests assert on static/dist/index.html, which is gitignored and which nothing
+# in the committed tree builds. See noteboard for the measurement and the fork.
+#
+# So the exclusion now rests on ONE honest reason rather than two: turning this
+# on would paint the guard red until argraphments is fixed, and a guard everyone
+# has learned to ignore is worse than no guard at all. Fix that repo and the
+# cost of `stages+=(test)` by default is, as measured, zero red repos.
 #
 # Tier 2: --smoke
 # ---------------
