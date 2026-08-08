@@ -111,6 +111,53 @@ if "max_behind" not in thresholds:
     print("FAIL: repo-deploy report declares no max_behind threshold, so its verdict states no tolerance.")
     sys.exit(1)
 
+if "executables_scanned" not in report:
+    # Written by every deploy sweep since 2026-08-08. A report without it is
+    # either older than that or came from something other than this sweep, and
+    # either way the coverage below cannot be reconciled.
+    #
+    # WARNING, and it is the sibling reader correcting itself in advance: what
+    # this branch buys, measured by deleting it, is NOT the difference between
+    # green and red. Without it the next line raises KeyError, python exits 1,
+    # and the check goes red anyway. It buys a sentence that names the cause
+    # instead of a traceback. Said plainly, because a future reader who
+    # disproves an overclaim here would read that as clearance to delete the
+    # branch. The refusal that genuinely changes the verdict is the
+    # reconciliation below: with THAT one removed, an unbalanced report prints
+    # a green ok line and exits 0.
+    print(
+        "FAIL: repo-deploy report carries no coverage accounting "
+        "(executables_scanned is absent), so how much of what is deployed it "
+        "covered cannot be established. Re-run the sweep."
+    )
+    sys.exit(1)
+
+# The coverage identity:
+#
+#     executables_scanned == artifacts_total + len(skipped_not_go)
+#
+# It is an identity, not a policy. It passes no judgement on whether excluding a
+# non-Go executable is reasonable — only that every candidate left the sweep by a
+# route the report names. When it fails, something stopped being covered through
+# a path nobody wrote down.
+#
+# That is worth a refusal because this coverage shrinks in the direction that
+# looks healthy. A Go artifact that stops emitting buildinfo does not go red — it
+# simply leaves artifacts_total, and the ok line goes on printing one artifact
+# smaller. That is not hypothetical here: ~/bin/kayushkin-server, the binary
+# serving the live site, sat in exactly that blind spot for its whole life and
+# every guard on this box was green throughout.
+scanned = report["executables_scanned"]
+skipped = len(report.get("skipped_not_go", []))
+if scanned != total + skipped:
+    print(
+        f"FAIL: repo-deploy coverage does not reconcile — {scanned} executables "
+        f"scanned, but {total} compared plus {skipped} named as not-Go "
+        f"= {total + skipped}. Some executable left the sweep by a route the "
+        f"report does not record, so the coverage figure below is not trustworthy."
+    )
+    sys.exit(1)
+
 problems = []
 
 if stale:
@@ -148,9 +195,14 @@ if problems:
 
 ghost_note = f", {len(ghosts)} ghost artifact(s)" if ghosts else ""
 max_behind = thresholds["max_behind"]
+# The coverage figure is printed, not merely reconciled. The identity above
+# proves the numbers add up; it cannot tell that 76 was 77 last night. Putting
+# both halves on the line a human actually reads is what makes an artifact
+# silently leaving the sweep look different from a clean fleet.
 print(
     f"ok: all {total} deployed artifacts match their committed HEAD within "
     f"{max_behind} commits{ghost_note} "
-    f"(checked {age_hours:.1f}h ago)"
+    f"({total} of {scanned} executables scanned are Go binaries, "
+    f"checked {age_hours:.1f}h ago)"
 )
 '

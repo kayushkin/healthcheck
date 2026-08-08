@@ -93,6 +93,26 @@
 # The main package path separates the ten and unites the three. We report the
 # idle copies by path, since the path is what you delete.
 #
+# What it does NOT compare, and how a reader can tell
+# ----------------------------------------------------
+# `artifacts_total` is the number of executables this sweep could IDENTIFY as Go
+# binaries — not the number it looked at. That difference used to be invisible:
+# measured 2026-08-08, 76 of 94 candidates were compared and the other 18 left
+# through the "not a Go binary" hatch without appearing in any count, list or
+# failure. `ok: all 76 deployed artifacts match their committed HEAD` was the
+# whole story a reader ever got, and it reads as a statement about the box.
+#
+# Both halves are reported now — `executables_scanned` and `skipped_not_go` —
+# and repo-deploy-status.sh refuses a report in which
+#
+#     executables_scanned != artifacts_total + len(skipped_not_go)
+#
+# because a candidate leaving by a route nothing records is precisely how this
+# coverage shrinks without anything going red. Note that the candidate list
+# includes the exe of every RUNNING process as well as the contents of BIN_DIRS,
+# so the scanned count moves a little run to run; it is an identity to reconcile,
+# not a constant to compare against last night.
+#
 # The second check: stale uncommitted work
 # ----------------------------------------
 # Same family of drift, other direction — code that exists only in a working
@@ -285,10 +305,42 @@ candidates="$(printf '%s%s' "$candidates" "$running_bins" | sort -u | sed '/^$/d
 rows=""
 drift_fail=0
 
+# Coverage accounting. `artifacts_total` is not the number of executables this
+# sweep looked at — it is what survived the "is this Go?" filter, and until
+# 2026-08-08 nothing anywhere said what the filter removed. The reader printed
+# `all 76 deployed artifacts match their committed HEAD` and 17 executables had
+# left without a trace.
+#
+# Counted INSIDE the loop, on the same line the loop considers a candidate,
+# rather than as a separate `wc -l` over $candidates. The two would be equal
+# today and could stop being equal after any edit to the loop head; a
+# denominator that can disagree with the thing it is the denominator OF is the
+# defect this accounting exists to catch, so it is not reintroduced here.
+executables_scanned=0
+# What left through the "not a Go binary" hatch, named rather than merely
+# dropped. Full paths, not basenames: ~/bin/foo and /usr/local/bin/foo are two
+# different artifacts, and the path is the thing you go and look at — the same
+# reason `ghost_artifacts` records paths.
+#
+# The category claim this hatch makes is TRUE — measured 2026-08-08, all 17 are
+# shell scripts, symlinks to .py, or third-party python. This is not a wrong
+# comment being corrected. It is that a Go artifact which ever stopped emitting
+# buildinfo would join them and vanish from the gate leaving no evidence, and
+# that has already happened on this box in a different form: `no-module` is a
+# branch the tenth pass had to add for ~/bin/kayushkin-server, the binary
+# serving the live site, which this sweep could not see for its whole life.
+skipped_not_go=()
+
 while IFS= read -r bin; do
   [ -z "$bin" ] && continue
+  executables_scanned=$((executables_scanned + 1))
   meta="$(artifact_meta "$bin")"
-  [ -z "$meta" ] && continue   # not a Go binary at all — nothing to compare
+  if [ -z "$meta" ]; then
+    # Not a Go binary at all — nothing to compare. Named, not dropped: "out of
+    # scope" and "silently stopped being covered" are indistinguishable from
+    # artifacts_total alone.
+    skipped_not_go+=("$bin"); continue
+  fi
 
   modpath="$(printf '%s' "$meta" | cut -f1)"
   main_pkg="$(printf '%s' "$meta" | cut -f2)"
@@ -434,6 +486,8 @@ DRIFT_ROWS="$rows" WIP_ROWS="$wip_rows" GHOSTS="$ghosts" \
 STARTED_AT="$started_at" \
 MAX_BEHIND="$MAX_BEHIND" MAX_BEHIND_DAYS="$MAX_BEHIND_DAYS" STALE_WIP_HOURS="$STALE_WIP_HOURS" \
 DRIFT_FAIL="$drift_fail" WIP_FAIL="$wip_fail" REPORT="$REPORT" \
+EXECUTABLES_SCANNED="$executables_scanned" \
+SKIPPED_NOT_GO="$(printf '%s\n' ${skipped_not_go+"${skipped_not_go[@]}"})" \
 python3 -c '
 import json, os
 
@@ -463,6 +517,10 @@ for w in wip:
 # space in it stays one entry.
 ghosts = [g.strip() for g in os.environ.get("GHOSTS", "").splitlines() if g.strip()]
 
+# Split on lines for the same reason ghosts does: these are paths, and a path
+# with a space in it must stay one entry.
+skipped_not_go = [s.strip() for s in os.environ.get("SKIPPED_NOT_GO", "").splitlines() if s.strip()]
+
 report = {
     "mode": "deploy",
     "generated_at": os.environ["STARTED_AT"],
@@ -471,7 +529,17 @@ report = {
         "max_behind_days": int(os.environ["MAX_BEHIND_DAYS"]),
         "stale_wip_hours": int(os.environ["STALE_WIP_HOURS"]),
     },
+    # The coverage pair. `executables_scanned` is every candidate the drift loop
+    # considered; `artifacts_total` is how many of them were Go binaries it could
+    # compare. The reader closes
+    #
+    #     executables_scanned == artifacts_total + len(skipped_not_go)
+    #
+    # which holds structurally, not by luck: past the `skipped_not_go` hatch every
+    # branch of that loop appends exactly one row before it continues.
+    "executables_scanned": int(os.environ["EXECUTABLES_SCANNED"]),
     "artifacts_total": len(drift),
+    "skipped_not_go": skipped_not_go,
     "drift_failures": int(os.environ["DRIFT_FAIL"]),
     "wip_failures": int(os.environ["WIP_FAIL"]),
     # A stale artifact that is RUNNING is the real finding; an idle one on disk
@@ -489,7 +557,7 @@ with open(os.environ["REPORT"], "w") as fh:
 '
 
 echo
-echo "deployed artifacts: $(printf '%s' "$rows" | grep -c . || true)   drift failures: $drift_fail   stale WIP: $wip_fail   ($(( finished_epoch - $(date -d "$started_at" +%s) ))s)"
+echo "deployed artifacts: $(printf '%s' "$rows" | grep -c . || true) of $executables_scanned executables scanned (${#skipped_not_go[@]} not Go)   drift failures: $drift_fail   stale WIP: $wip_fail   ($(( finished_epoch - $(date -d "$started_at" +%s) ))s)"
 echo "report: $REPORT"
 
 [ "$drift_fail" -eq 0 ] && [ "$wip_fail" -eq 0 ]

@@ -550,6 +550,136 @@ check "coverage: the reader prints the excluded directories, not just the judged
       "yes" \
       "$(case "$good_out" in *"2 of 4 directories"*) echo yes ;; *) echo "no: $good_out" ;; esac)"
 
+# ----------------------------------------------- fixture DEPLOY COVERAGE
+# The same accounting question asked of the OTHER sweep, which had no answer at
+# all. repo-deploy-audit.sh has its own denominator — executables considered —
+# and until 2026-08-08 it published only the numerator: `artifacts_total: 76`
+# while 18 executables left through the `not a Go binary` hatch with no record
+# anywhere in the report. The reader turned that into "all 76 deployed artifacts
+# match their committed HEAD", which is a coverage claim it had no basis for.
+#
+# The category claim the hatch makes is TRUE — all 18 really are shell scripts,
+# symlinks to .py, or third-party python. This is NOT a wrong comment being
+# corrected, and the distinction matters for whoever reads this next: the defect
+# is that a Go artifact which ever stopped emitting buildinfo would join them and
+# leave the gate with no evidence it had gone. That is not hypothetical here.
+# ~/bin/kayushkin-server, the binary serving the live site, sat in exactly this
+# blind spot for the whole life of the script while every guard on the box stayed
+# green; `no-module` is the branch that had to be added for it.
+#
+# ⚠️ ABSOLUTE COUNTS ARE DELIBERATELY NOT ASSERTED BELOW. This sweep builds its
+# candidate list from BIN_DIRS *plus* the exe of every running process, so the
+# denominator genuinely moves between two runs seconds apart — measured 93 then
+# 94 on this box, the difference being a transient `sleep`. A check pinning an
+# absolute number here would be flaky by construction. What is deterministic is
+# the IDENTITY and the MEMBERSHIP, so that is what these checks pin.
+#
+# Sabotage results, each mechanism deleted separately (per the rule that one
+# sabotage reddening everything proves less than several reddening different
+# things). All four produce distinct signatures:
+#
+#   sweep: drop `skipped_not_go+=`      -> 41 scanned vs 34 compared, "0 named as not-Go"
+#   sweep: drop the scanned counter     -> "0 executables scanned" vs 41 accounted
+#   reader: drop the reconciliation     -> unbalanced report prints ok AND EXITS 0
+#   reader: drop the missing-key branch -> still red, but as a raw KeyError traceback
+#
+# That third one is the refusal that changes a verdict. The fourth buys a legible
+# sentence and nothing more, and it says so in its own comment in the reader —
+# recorded here too so that disproving the overclaim never reads as clearance to
+# delete it.
+DEPLOY_GO=""
+for dcov_candidate in /usr/local/go/bin "$HOME/.local/share/mise/installs/go"/*/bin; do
+  [ -x "$dcov_candidate/go" ] && { DEPLOY_GO="$dcov_candidate"; break; }
+done
+
+if [ -n "$DEPLOY_GO" ]; then
+  DCOV="$ROOT/deploycov"
+  mkdir -p "$DCOV/bin" "$DCOV/repos"
+  make_cov_repo "$DCOV/repos/dcovmain" yes yes -
+  # A REAL Go binary, built rather than faked, because the whole filter under
+  # test is `go version -m` reading buildinfo out of it. A stub file would be
+  # classified non-Go and the fixture would assert nothing.
+  ( PATH="$DEPLOY_GO:$PATH"; cd "$DCOV/repos/dcovmain" && go build -o "$DCOV/bin/dcovgo" . ) >/dev/null 2>&1
+  printf '#!/bin/sh\necho not go\n' > "$DCOV/bin/dcovscript.sh"
+  printf '#!/usr/bin/env python3\nprint("x")\n' > "$DCOV/bin/dcovpython"
+  chmod +x "$DCOV/bin/dcovscript.sh" "$DCOV/bin/dcovpython"
+
+  REPOS_DIR="$DCOV/repos" BIN_DIRS="$DCOV/bin" REPORT="$ROOT/dcov.json" \
+    bash "$DEPLOY_AUDIT" >/dev/null 2>&1
+
+  # Naming is the assertion the section exists for. It is what separates "this
+  # executable is out of scope" from "this executable silently stopped being
+  # covered", and artifacts_total alone cannot tell the two apart.
+  check "deploy coverage: the sweep NAMES both non-Go executables it excluded" \
+        "dcovpython,dcovscript.sh" \
+        "$(report_field "$ROOT/dcov.json" '",".join(sorted(p.rsplit("/", 1)[-1] for p in d["skipped_not_go"] if "/deploycov/" in p))')"
+  # The converse, so the check above cannot pass by skipping everything: the Go
+  # binary sitting in the SAME directory was compared. Without this pair, a sweep
+  # that classified all three as non-Go would satisfy the naming check and the
+  # identity at once.
+  check "deploy coverage: the Go binary beside them was compared, not skipped" \
+        "True" \
+        "$(report_field "$ROOT/dcov.json" 'any("dcovgo" in a["artifact"] for a in d["artifacts"])')"
+  check "deploy coverage: the accounting closes" \
+        "0" \
+        "$(report_field "$ROOT/dcov.json" 'd["executables_scanned"] - (d["artifacts_total"] + len(d["skipped_not_go"]))')"
+
+  # --- the reader half. Same two refusals as the build family, same reasoning. ---
+  #
+  # Derived from the real sweep above rather than hand-written, so the fixture
+  # reconciles for the same reason a live report does. stale_running and stale_wip
+  # are cleared because this box genuinely has drifted binaries running: without
+  # that the reader exits 1 on its own merits and the ok-path checks below would
+  # pass with every refusal deleted.
+  python3 - "$ROOT/dcov.json" "$ROOT/dcov-good.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["stale_running"] = []
+d["stale_wip"] = []
+json.dump(d, open(sys.argv[2], "w"))
+PY
+  dcov_good_out=$(REPORT="$ROOT/dcov-good.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+  dcov_good_rc=$?
+  check "deploy coverage: a reconciling report is still accepted" \
+        "0 yes" \
+        "$dcov_good_rc $(case "$dcov_good_out" in ok:*) echo yes ;; *) echo "no: $dcov_good_out" ;; esac)"
+  # The figure has to reach the line a human reads. The identity proves the
+  # numbers add up; it cannot tell that 76 was 77 last night.
+  check "deploy coverage: the reader prints what was scanned, not only what was compared" \
+        "yes" \
+        "$(case "$dcov_good_out" in *"executables scanned are Go binaries"*) echo yes ;; *) echo "no: $dcov_good_out" ;; esac)"
+
+  python3 - "$ROOT/dcov-good.json" "$ROOT/dcov-nokeys.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+del d["executables_scanned"]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+  dcov_nokeys_out=$(REPORT="$ROOT/dcov-nokeys.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+  dcov_nokeys_rc=$?
+  check "deploy coverage: the reader refuses a report with no coverage accounting at all" \
+        "1 yes" \
+        "$dcov_nokeys_rc $(case "$dcov_nokeys_out" in *"no coverage accounting"*) echo yes ;; *) echo "no: $dcov_nokeys_out" ;; esac)"
+
+  # Drop the excluded list while leaving the scanned count alone: the exact shape
+  # of a sweep that grew a new way to skip something and did not record it. Every
+  # other field stays self-consistent, which is why nothing else in the reader
+  # catches it.
+  python3 - "$ROOT/dcov-good.json" "$ROOT/dcov-unbalanced.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["skipped_not_go"] = []
+json.dump(d, open(sys.argv[2], "w"))
+PY
+  dcov_unbal_out=$(REPORT="$ROOT/dcov-unbalanced.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+  dcov_unbal_rc=$?
+  check "deploy coverage: the reader refuses a report whose coverage does not reconcile" \
+        "1 yes" \
+        "$dcov_unbal_rc $(case "$dcov_unbal_out" in *"does not reconcile"*) echo yes ;; *) echo "no: $dcov_unbal_out" ;; esac)"
+else
+  echo "SKIP  deploy coverage fixture (no go toolchain)"
+fi
+
 # ------------------------------------------------------ fixture EMPTY SWEEP
 # The sweep does not treat "discovered nothing" as a refusal. An empty repos root
 # exits 0 and writes repos_total=0 with no `aborted` and no `only`, so every check
