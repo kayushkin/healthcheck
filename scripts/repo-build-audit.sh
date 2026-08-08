@@ -278,11 +278,12 @@ start_epoch=$(date +%s)
 #
 # Defined here, above the toolchain gate, because that gate is one of its callers.
 write_aborted_report() {
-  STARTED_AT="$started_at" MODE="$MODE" REASON="$1" REPORT="$REPORT" python3 -c '
+  STARTED_AT="$started_at" MODE="$MODE" REASON="$1" REPORT="$REPORT" ONLY="$ONLY" python3 -c '
 import json, os
 with open(os.environ["REPORT"], "w") as fh:
     json.dump({
         "mode": os.environ["MODE"],
+        "only": os.environ["ONLY"],
         "generated_at": os.environ["STARTED_AT"],
         "aborted": os.environ["REASON"],
         "duration_seconds": 0,
@@ -1133,6 +1134,7 @@ printf '%s\n' "${results[@]}" |
   NODE_VERSION="$(command -v node >/dev/null 2>&1 && node --version || echo '')" \
   WITH_TESTS="$WITH_TESTS" \
   MODE="$MODE" \
+  ONLY="$ONLY" \
   TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
   WITHOUT_CHECK="$(printf '%s\n' ${without_check+"${without_check[@]}"})" \
   WORKTREES="$(printf '%s\n' ${linked_worktrees+"${linked_worktrees[@]}"})" \
@@ -1151,6 +1153,13 @@ for line in sys.stdin.read().splitlines():
 mode = os.environ["MODE"]
 report = {
     "mode": mode,
+    # The --only filter this sweep ran under, or "" for a full fleet sweep. A
+    # filtered run writes the SAME report path as a full one, so without this the
+    # two are indistinguishable: `--only healthcheck` leaves repos_total=1, ok=1
+    # behind, and every status reader calls that a green fleet. The readers refuse
+    # a report with a non-empty `only`, which is the repo rule that a guard which
+    # quietly stopped covering something must not look like one that is passing.
+    "only": os.environ["ONLY"],
     "generated_at": os.environ["STARTED_AT"],
     "duration_seconds": int(os.environ["DURATION"]),
     "go_version": os.environ["GO_VERSION"],

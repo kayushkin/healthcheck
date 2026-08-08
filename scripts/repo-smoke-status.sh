@@ -63,6 +63,20 @@ if aborted:
     print(f"FAIL: repo-smoke sweep did not run — {aborted}. No binary was checked.")
     sys.exit(1)
 
+only = report.get("only")
+if only:
+    # A --only sweep writes this SAME report path as a full one, so the two are
+    # otherwise indistinguishable: the filter drops repos_total to the number that
+    # matched and every count below agrees with itself, leaving a green verdict that
+    # covers one repo. Refuse it. A partial sweep able to pass for the fleet verdict
+    # is the same defect as a guard that quietly stopped running, which this file
+    # already refuses on staleness and on abort.
+    print(
+        "FAIL: the last repo-smoke sweep ran with --only " + str(only) + ", so it covered "
+        "that repo alone and not the fleet. Re-run the sweep with no filter."
+    )
+    sys.exit(1)
+
 generated = datetime.datetime.fromisoformat(report["generated_at"])
 if generated.tzinfo is None:
     print("FAIL: report generated_at has no timezone offset")

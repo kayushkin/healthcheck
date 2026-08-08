@@ -248,6 +248,37 @@ check "status: a missing toolchain fails the check" "1" "$?"
 check "status: the failure names the toolchain" "yes" \
       "$(case "$status_out" in *"npm is not on PATH"*) echo yes ;; *) echo "no: $status_out" ;; esac)"
 
+# ------------------------------------------------------------ fixture --only
+# --only writes the SAME report path as a full sweep, so a filtered run used to
+# be indistinguishable from a fleet one: `--only healthcheck` left repos_total=1,
+# ok=1, failed=0 behind and every status reader called that a green fleet. It is
+# the staleness bug wearing different clothes — a sweep that covered almost
+# nothing looking exactly like one that passed — so it is refused the same way.
+REPOS_DIR="$OKDIR" REPORT="$ROOT/only-build.json" bash "$AUDIT" --only alpha >/dev/null 2>&1
+check "only: a filtered sweep records its filter in the report" \
+      "alpha" "$(report_field "$ROOT/only-build.json" 'd["only"]')"
+check "only: the filter really did narrow the sweep" \
+      "1" "$(report_field "$ROOT/only-build.json" 'd["repos_total"]')"
+only_out=$(REPORT="$ROOT/only-build.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)
+only_rc=$?
+# Exit code and reason are pinned TOGETHER, deliberately. A bare exit-1 assertion
+# proves nothing here: the alpha fixture also fails go vet, so this reader exits 1
+# whether or not it noticed the filter. The first draft of this check did exactly
+# that and went on passing with the refusal deleted.
+check "status: a filtered report is refused BY NAME, not read as the fleet verdict" \
+      "1 yes" \
+      "$only_rc $(case "$only_out" in *"--only alpha"*) echo yes ;; *) echo "no: $only_out" ;; esac)"
+# The other direction, so the check above cannot pass by refusing everything: an
+# unfiltered sweep records only="" and is still read normally.
+#
+# Asserted as repr(d.get(...)) rather than d["only"], because report_field sends
+# its own errors to /dev/null: a plain d["only"] on a report MISSING the key
+# prints nothing, which compares equal to the empty string this is trying to
+# prove is present. The first draft of this check passed that way and proved
+# nothing.
+check "only: a full sweep records an empty filter, and records it" \
+      "''" "$(report_field "$ROOT/ok-smoke.json" 'repr(d.get("only", "ABSENT"))')"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
