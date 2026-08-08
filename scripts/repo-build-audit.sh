@@ -100,13 +100,37 @@
 # So --node clones each package's committed HEAD, clones the committed HEADs of
 # the siblings it links with `file:`, and runs the package's OWN declared build.
 #
-# Deliberately NOT run: a bolted-on `tsc --noEmit`.
-#   Seven of the nine packages already run `tsc` inside their build script, so
-#   for them it is redundant. The two that do not (kayushkin.com, claude-squad)
-#   never adopted it, and kayushkin.com has a pre-existing type error — gating on
-#   tsc would paint the guard red from day one over a repo whose build is fine
-#   and whose site is up. That is the `go test` decision above, for the same
-#   reason: a guard everyone has learned to ignore is worse than no guard.
+# Deliberately NOT run: a bolted-on `tsc --noEmit`. The conclusion stands; the
+# reasoning below is the measured version, taken 2026-08-08.
+#
+# ⚠️ This paragraph used to read "Seven of the nine packages already run `tsc`
+# inside their build script ... the two that do not (kayushkin.com,
+# claude-squad) never adopted it, and kayushkin.com has a pre-existing type
+# error". Three counts, none of them checked since. Measured against HEAD:
+#
+#   12 packages, not nine — the count this script's own report has printed as
+#   `packages_total` for as long as the field has existed.
+#   10 declare a build script; 8 of those run `tsc` inside it.
+#   claude-squad/web was never an exception. Its build is `next build`, it
+#   commits web/tsconfig.json, and web/next.config.ts sets no
+#   `typescript.ignoreBuildErrors` — so Next type-checks it on every run here.
+#   It adopted type-checking, it just spells it `next build`.
+#   happy and llm-bridge/ts run no tsc, but both are already reported
+#   `unguarded` and by name, for install-level reasons (pnpm absent; no
+#   lockfile). Neither is silently counted as passing.
+#
+# So the claim reduced to ONE package — kayushkin.com, whose `vite build` does
+# not type-check — and its "pre-existing type error" was exactly one error in
+# one file: src/api/videos.ts(30,21), TS2344, VideoLibrary declared as an
+# interface where jsonObject's constraint needs the implicit index signature
+# only a type alias gets. Fixed in kayushkin.com eb0a357, which also declares
+# `check: tsc --noEmit`.
+#
+# The right repair was the package adopting `check`, not this guard growing a
+# flag: see the `check` stage below, whose whole argument is that a script the
+# package DID adopt is what a guard should run. So every package that can be
+# type-checked now is, through its own declared scripts, and a bolted-on
+# `tsc --noEmit` would be redundant rather than merely unwelcome.
 #   The repo's own build script is the contract; this runs THAT.
 #
 # The third stage, `artifact`, has no Go equivalent and is the reason this mode
@@ -137,10 +161,22 @@
 # run is indistinguishable from one that is passing — that this whole file
 # exists to destroy.
 #
-# `check` and not `test`: `test` is npm's universal name and several packages
-# here declare one that needs a browser or a live service (kayushkin.com's is
-# `playwright test`), so gating on it would paint the guard red from day one —
-# the `go test` decision above, again. `check` is this fleet's name for the
+# `check` and not `test`. ⚠️ This too used to rest on an uncounted plural —
+# "several packages here declare one that needs a browser or a live service" —
+# and it is the third time this file makes that move. Measured 2026-08-08:
+# THREE of the twelve packages declare `test` at all. chat-core's is
+# `vitest run`, miditab's is `node --test test/*.test.mjs`, and both run from a
+# plain install; exactly ONE needs a browser, and it is the one the sentence
+# named as its example (kayushkin.com's `playwright test`). None needs a live
+# service. Better still, chat-core and miditab each declare `check` as literally
+# `npm run test`, so this guard ALREADY runs both of them nightly and both are
+# green — the two packages the plural was warning about are covered by the very
+# stage the plural was defending.
+#
+# The conclusion survives anyway, on the one case that is real: gating on `test`
+# would demand a browser this host does not run, so it would paint the guard red
+# from day one — the `go test` decision above, again, and there the same hedge
+# turned out to be false. State the number. `check` is this fleet's name for the
 # assertions that run from a plain install, and adopting it is how a package
 # opts in. Packages that declare none are listed in the report as
 # `without_check`, the way --smoke lists `without_smoke`: an uncovered package
