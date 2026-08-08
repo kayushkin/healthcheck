@@ -11,6 +11,16 @@
 # quietly stopped running looks exactly like a guard that is passing, and that
 # equivalence is what let a broken tree ship for 3.5 months.
 #
+# It also refuses a report the sweep stamped for another MODE. This file picks
+# its report by path, but the sweep takes its mode from a flag and its path from
+# REPORT=, so the pairing can be wrong — and the four modes name their counts
+# alike enough that a wrong one reads as a clean fleet rather than an error.
+#
+# And it refuses a sweep that JUDGED nothing — ok + failed of zero, counted
+# rather than the repos_total the sweep merely looked at. Such a sweep writes
+# no `aborted` and no `only`, so every check above passes in turn and this
+# file used to print "ok: 0/0" and exit 0.
+#
 # Prints a line containing "ok" (healthcheck's expect_output) and exits 0 when
 # the last sweep was clean and recent; otherwise prints why and exits 1.
 
@@ -35,6 +45,19 @@ try:
         report = json.load(fh)
 except Exception as err:
     print(f"FAIL: repo-build-audit report is unreadable ({err})")
+    sys.exit(1)
+
+if report.get("mode") != "build":
+    # Checked FIRST, because until the mode is right every field below is being
+    # read off the wrong run. This reader picks its report by PATH, but the sweep
+    # takes its mode from --smoke/--node/--elf and its path from REPORT=, and the
+    # two can be paired wrongly — which is the documented way to run one guard by
+    # hand without clobbering the fleet report. The four modes name their counts
+    # alike (repos_total, ok, failed, unguarded), so nothing downstream notices:
+    # fed the elf report, this file printed "ok: 78/81 repos build from a clean
+    # clone of HEAD" and exited 0, for a sweep that compiled nothing at all. The
+    # sweep stamps mode on every report it writes, including the aborted ones.
+    print("FAIL: repo-build report is not a --build report (mode=" + str(report.get("mode")) + ")")
     sys.exit(1)
 
 aborted = report.get("aborted")
@@ -76,6 +99,23 @@ if age_hours > max_age:
         f"(max {max_age:.0f}h). The build guard is not running; nothing is "
         f"checking that the committed trees still compile."
     )
+    sys.exit(1)
+
+if ok + failed == 0:
+    # Judged, not merely SEEN. repos_total counts every repo the sweep looked at,
+    # including the unguarded ones it could not judge at all, so it is the wrong
+    # quantity to gate on: a sweep in which every repo came back unguarded prints
+    # a repos_total the reader is happy with and an ok count of zero. This check
+    # was written against repos_total first and the selftest caught it — an --elf
+    # sweep of an empty root reports repos_total=1 having scanned nothing, because
+    # the unmatched glob is swept as a repo literally named *.
+    #
+    # A sweep that judged nothing is not a clean fleet. It writes no `aborted` and
+    # no `only`, so every check above passes in turn and this file used to print
+    # "ok: 0/0" and exit 0 — the --only defect without the flag. It needs no bug to
+    # reach: the root comes from REPOS_DIR, and this guard runs from a systemd unit
+    # whose Environment has already been wrong twice.
+    print("FAIL: repo-build sweep judged 0 repositories, so nothing was checked.")
     sys.exit(1)
 
 if failed:

@@ -21,6 +21,17 @@
 # must commit a binary is a decision to make out loud when it happens, not a line
 # pre-blessed here.
 #
+# It also refuses a report the sweep stamped for another MODE. This file picks
+# its report by path, but the sweep takes its mode from a flag and its path from
+# REPORT=, so the pairing can be wrong. Here that misfires in the loud direction:
+# fed the node report, this file named a repo as carrying a committed binary it
+# does not have.
+#
+# And it refuses a sweep that JUDGED nothing — ok + failed of zero, counted
+# rather than the repos_total the sweep merely looked at. Such a sweep writes
+# no `aborted` and no `only`, so every check above passes in turn and this
+# file used to print "ok: 0/0" and exit 0.
+#
 # Prints a line containing "ok" (healthcheck's expect_output) and exits 0 when
 # the last scan found no committed binaries and is recent; otherwise prints which
 # repos carry one and exits 1.
@@ -46,6 +57,21 @@ try:
         report = json.load(fh)
 except Exception as err:
     print(f"FAIL: repo-elf report is unreadable ({err})")
+    sys.exit(1)
+
+if report.get("mode") != "elf":
+    # Checked FIRST, because until the mode is right every field below is being
+    # read off the wrong run. This reader picks its report by PATH, but the sweep
+    # takes its mode from --smoke/--node/--elf and its path from REPORT=, and the
+    # two can be paired wrongly — which is the documented way to run one guard by
+    # hand without clobbering the fleet report. Here it goes wrong in the loud
+    # direction rather than the quiet one, which is worse to read: fed the node
+    # report, this file announced "1 repo(s) have a committed ELF binary at HEAD:
+    # llmux" — llmux has no such thing, its actual failure was a stale JavaScript
+    # bundle. A guard that names a repo for a crime it did not commit sends
+    # someone after a file that is not there. The sweep stamps mode on every
+    # report it writes, including the aborted ones.
+    print("FAIL: repo-elf report is not an --elf report (mode=" + str(report.get("mode")) + ")")
     sys.exit(1)
 
 aborted = report.get("aborted")
@@ -87,6 +113,23 @@ if age_hours > max_age:
         f"(max {max_age:.0f}h). The committed-binary guard is not running; nothing "
         f"is checking that a compiled binary has not been committed into a source tree."
     )
+    sys.exit(1)
+
+if ok + failed == 0:
+    # Judged, not merely SEEN. repos_total counts every repo the sweep looked at,
+    # including the unguarded ones it could not judge at all, so it is the wrong
+    # quantity to gate on: a sweep in which every repo came back unguarded prints
+    # a repos_total the reader is happy with and an ok count of zero. This check
+    # was written against repos_total first and the selftest caught it — an --elf
+    # sweep of an empty root reports repos_total=1 having scanned nothing, because
+    # the unmatched glob is swept as a repo literally named *.
+    #
+    # A sweep that judged nothing is not a clean fleet. It writes no `aborted` and
+    # no `only`, so every check above passes in turn and this file used to print
+    # "ok: 0/0" and exit 0 — the --only defect without the flag. It needs no bug to
+    # reach: the root comes from REPOS_DIR, and this guard runs from a systemd unit
+    # whose Environment has already been wrong twice.
+    print("FAIL: repo-elf sweep judged 0 repositories, so nothing was checked.")
     sys.exit(1)
 
 if failed:

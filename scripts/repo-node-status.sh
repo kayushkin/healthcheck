@@ -22,6 +22,16 @@
 # so the gap stays visible and shrinks, but a red-from-day-one check is a check
 # people learn to ignore — and an ignored guard is worse than no guard.
 #
+# It also refuses a report the sweep stamped for another MODE. This file picks
+# its report by path, but the sweep takes its mode from a flag and its path from
+# REPORT=, so the pairing can be wrong — and the four modes name their counts
+# alike enough that a wrong one reads as a clean fleet rather than an error.
+#
+# And it refuses a sweep that JUDGED nothing — ok + failed of zero, counted
+# rather than the repos_total the sweep merely looked at. Such a sweep writes
+# no `aborted` and no `only`, so every check above passes in turn and this
+# file used to print "ok: 0/0" and exit 0.
+#
 # The same call, for the same reason, on `without_check`: packages that install
 # and build but declare no `check` script, so the sweep ran no assertion about
 # how they behave. Declaring one is how a package opts in; the count is printed
@@ -51,6 +61,20 @@ try:
         report = json.load(fh)
 except Exception as err:
     print(f"FAIL: repo-node report is unreadable ({err})")
+    sys.exit(1)
+
+if report.get("mode") != "node":
+    # Checked FIRST, because until the mode is right every field below is being
+    # read off the wrong run. This reader picks its report by PATH, but the sweep
+    # takes its mode from --smoke/--node/--elf and its path from REPORT=, and the
+    # two can be paired wrongly — which is the documented way to run one guard by
+    # hand without clobbering the fleet report. The four modes name their counts
+    # alike (repos_total, ok, failed, unguarded), so nothing downstream notices:
+    # fed the Go build report, this file printed "ok: 71/71 node packages install,
+    # build and pass their declared checks" and exited 0. There are 12 node
+    # packages, and that run never invoked npm. The sweep stamps mode on every
+    # report it writes, including the aborted ones.
+    print("FAIL: repo-node report is not a --node report (mode=" + str(report.get("mode")) + ")")
     sys.exit(1)
 
 aborted = report.get("aborted")
@@ -92,6 +116,23 @@ if age_hours > max_age:
         f"(max {max_age:.0f}h). The TS/React build guard is not running; nothing "
         f"is checking that the committed frontends still install and build."
     )
+    sys.exit(1)
+
+if ok + failed == 0:
+    # Judged, not merely SEEN. repos_total counts every repo the sweep looked at,
+    # including the unguarded ones it could not judge at all, so it is the wrong
+    # quantity to gate on: a sweep in which every repo came back unguarded prints
+    # a repos_total the reader is happy with and an ok count of zero. This check
+    # was written against repos_total first and the selftest caught it — an --elf
+    # sweep of an empty root reports repos_total=1 having scanned nothing, because
+    # the unmatched glob is swept as a repo literally named *.
+    #
+    # A sweep that judged nothing is not a clean fleet. It writes no `aborted` and
+    # no `only`, so every check above passes in turn and this file used to print
+    # "ok: 0/0" and exit 0 — the --only defect without the flag. It needs no bug to
+    # reach: the root comes from REPOS_DIR, and this guard runs from a systemd unit
+    # whose Environment has already been wrong twice.
+    print("FAIL: repo-node sweep judged 0 packages, so nothing was checked.")
     sys.exit(1)
 
 if failed:

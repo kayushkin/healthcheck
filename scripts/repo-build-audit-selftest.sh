@@ -279,6 +279,99 @@ check "status: a filtered report is refused BY NAME, not read as the fleet verdi
 check "only: a full sweep records an empty filter, and records it" \
       "''" "$(report_field "$ROOT/ok-smoke.json" 'repr(d.get("only", "ABSENT"))')"
 
+# ------------------------------------------------------------- fixture MODE
+# Each status reader picks its report by PATH. The sweep picks its mode from a
+# flag and its path from REPORT=, independently, so the pairing can be wrong —
+# and writing to your own REPORT= path is exactly what the --only finding above
+# tells you to do when running a guard by hand. The four modes name their counts
+# alike (repos_total, ok, failed, unguarded), so a mismatched pair did not error,
+# it went GREEN over a run that measured something else: fed the elf report, the
+# build reader announced "78/81 repos build from a clean clone of HEAD" for a
+# sweep that compiled nothing. The elf reader fails the other way and names an
+# innocent repo as carrying a committed binary.
+#
+# A full unfiltered build report, deliberately NOT only-build.json: that one
+# carries only=alpha, so every reader refuses it for the FILTER and these checks
+# would pass with the mode refusal deleted.
+REPOS_DIR="$OKDIR" REPORT="$ROOT/ok-build.json" bash "$AUDIT" >/dev/null 2>&1
+check "mode: a build sweep stamps its mode" \
+      "build" "$(report_field "$ROOT/ok-build.json" 'd["mode"]')"
+check "mode: the cross-feed fixture carries no filter, so only the mode can refuse it" \
+      "''" "$(report_field "$ROOT/ok-build.json" 'repr(d.get("only", "ABSENT"))')"
+
+# Exit code and reason are pinned TOGETHER for the same reason the --only checks
+# are: these fixtures make several readers exit 1 on their own merits, so a bare
+# exit-1 assertion would pass with the refusal deleted.
+for reader_mode in "repo-node-status.sh:node:ok-build.json" \
+                   "repo-deploy-status.sh:deploy:ok-build.json" \
+                   "repo-build-audit-status.sh:build:ok-smoke.json" \
+                   "repo-elf-status.sh:elf:ok-build.json"; do
+  reader="${reader_mode%%:*}"; rest="${reader_mode#*:}"
+  want="${rest%%:*}"; fixture="${rest#*:}"
+  mode_out=$(REPORT="$ROOT/$fixture" bash "$HERE/$reader" 2>&1)
+  mode_rc=$?
+  check "mode: $reader refuses $fixture BY NAME instead of reading it as its own verdict" \
+        "1 yes" \
+        "$mode_rc $(case "$mode_out" in *"is not a"*"$want report"*) echo yes ;; *) echo "no: $mode_out" ;; esac)"
+done
+
+# The other direction, so the four checks above cannot pass by refusing
+# everything. Asserted on the ABSENCE of the refusal rather than on exit 0,
+# because the alpha fixture fails go vet and this reader exits 1 on its merits.
+same_out=$(REPORT="$ROOT/ok-build.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)
+check "mode: a correctly paired report is NOT refused for its mode" \
+      "no" \
+      "$(case "$same_out" in *"is not a --build report"*) echo "yes: $same_out" ;; *) echo no ;; esac)"
+
+# ------------------------------------------------------ fixture EMPTY SWEEP
+# The sweep does not treat "discovered nothing" as a refusal. An empty repos root
+# exits 0 and writes repos_total=0 with no `aborted` and no `only`, so every check
+# the readers already carried passed in turn and they printed "ok: 0/0 repos build
+# from a clean clone of HEAD" — green, fresh, self-consistent, covering nothing.
+# It is the --only defect without the flag, and it needs no bug to reach: the root
+# comes from REPOS_DIR, and this guard runs from a systemd unit whose Environment
+# has already been wrong twice in this file's history.
+EMPTY="$ROOT/empty-root"
+mkdir -p "$EMPTY"
+for mode_reader in ":build:repo-build-audit-status.sh" \
+                   "--smoke:smoke:repo-smoke-status.sh" \
+                   "--elf:elf:repo-elf-status.sh"; do
+  flag="${mode_reader%%:*}"; rest="${mode_reader#*:}"
+  tag="${rest%%:*}"; reader="${rest#*:}"
+  # shellcheck disable=SC2086
+  REPOS_DIR="$EMPTY" REPORT="$ROOT/empty-$tag.json" bash "$AUDIT" $flag >/dev/null 2>&1
+  check "empty: a $tag sweep of an empty root judges nothing" \
+        "0" "$(report_field "$ROOT/empty-$tag.json" 'd["ok"] + d["failed"]')"
+  # Pinned because it is the whole reason a count check is needed: if the sweep
+  # DID record an abort here, the pre-existing abort check would already catch
+  # this and the refusal below would be untestable dead code.
+  check "empty: a $tag sweep records no abort, so only a count check can catch it" \
+        "None" "$(report_field "$ROOT/empty-$tag.json" 'repr(d.get("aborted"))')"
+  empty_out=$(REPORT="$ROOT/empty-$tag.json" bash "$HERE/$reader" 2>&1)
+  empty_rc=$?
+  check "empty: $reader refuses a sweep that judged nothing instead of calling it a clean fleet" \
+        "1 yes" \
+        "$empty_rc $(case "$empty_out" in *"judged 0 repositories"*) echo yes ;; *) echo "no: $empty_out" ;; esac)"
+done
+
+# --node needs npm, so it cannot ride the loop above. It gets its own gated case
+# rather than none: the first draft left it out, and deleting the node refusal
+# then changed nothing in this file — an assertion that only looks like one.
+if command -v npm >/dev/null 2>&1; then
+  REPOS_DIR="$EMPTY" REPORT="$ROOT/empty-node.json" bash "$AUDIT" --node >/dev/null 2>&1
+  check "empty: a node sweep of an empty root judges nothing" \
+        "0" "$(report_field "$ROOT/empty-node.json" 'd["ok"] + d["failed"]')"
+  check "empty: a node sweep records no abort, so only a count check can catch it" \
+        "None" "$(report_field "$ROOT/empty-node.json" 'repr(d.get("aborted"))')"
+  empty_out=$(REPORT="$ROOT/empty-node.json" bash "$HERE/repo-node-status.sh" 2>&1)
+  empty_rc=$?
+  check "empty: repo-node-status.sh refuses a sweep that judged nothing instead of calling it a clean fleet" \
+        "1 yes" \
+        "$empty_rc $(case "$empty_out" in *"judged 0 packages"*) echo yes ;; *) echo "no: $empty_out" ;; esac)"
+else
+  echo "SKIP  node empty-sweep fixture (npm is not on PATH)"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

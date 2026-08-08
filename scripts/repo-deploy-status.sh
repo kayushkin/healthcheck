@@ -11,6 +11,11 @@
 # does: a guard that quietly stopped running is indistinguishable from a guard
 # that is passing, and that equivalence is the entire bug class.
 #
+# It also refuses a report stamped for another MODE, one that identified zero
+# artifacts, and one that states no max_behind tolerance. This file reads every
+# field with a default, so each of those three used to produce a GREEN line over
+# a comparison that never happened rather than an error.
+#
 # Prints a line containing "ok" (healthcheck's expect_output) and exits 0 when
 # nothing running is stale and no work is abandoned; otherwise prints why.
 
@@ -37,6 +42,18 @@ except Exception as err:
     print(f"FAIL: repo-deploy-audit report is unreadable ({err})")
     sys.exit(1)
 
+if report.get("mode") != "deploy":
+    # Checked FIRST, because until the mode is right every field below is being
+    # read off the wrong run. This reader picks its report by PATH, but both
+    # sweeps take their path from REPORT=, so the two can be paired wrongly —
+    # which is the documented way to run one guard by hand without clobbering the
+    # fleet report. This reader reads every field it wants with a default, so a
+    # foreign report does not error, it goes GREEN: fed the Go build report it
+    # printed "ok: all 0 deployed artifacts match their committed HEAD within ?
+    # commits" and exited 0. Both sweeps stamp mode on every report they write.
+    print("FAIL: repo-deploy report is not a --deploy report (mode=" + str(report.get("mode")) + ")")
+    sys.exit(1)
+
 generated = datetime.datetime.fromisoformat(report["generated_at"])
 if generated.tzinfo is None:
     print("FAIL: report generated_at has no timezone offset")
@@ -56,6 +73,24 @@ wip = report.get("stale_wip", [])
 ghosts = report.get("ghost_artifacts", [])
 total = report.get("artifacts_total", 0)
 thresholds = report.get("thresholds", {})
+
+if not total:
+    # The sweep identifies a deployed artifact by asking go version -m for its
+    # module path, and it gates on the toolchain before it starts. Zero artifacts
+    # therefore does not mean nothing is deployed on this box — 72 things are —
+    # it means the sweep identified none of them. Reporting that as a clean run
+    # is the same equivalence this file already refuses on staleness: nothing
+    # checked must not be able to read as nothing broken.
+    print("FAIL: repo-deploy report identified 0 deployed artifacts, so nothing was compared.")
+    sys.exit(1)
+
+if "max_behind" not in thresholds:
+    # The OK line states the tolerance it applied. Without this the reader
+    # printed a literal question mark in place of that number and still exited 0,
+    # so it called the fleet green without being able to say how stale a running
+    # binary was allowed to be.
+    print("FAIL: repo-deploy report declares no max_behind threshold, so its verdict states no tolerance.")
+    sys.exit(1)
 
 problems = []
 
@@ -93,7 +128,7 @@ if problems:
     sys.exit(1)
 
 ghost_note = f", {len(ghosts)} ghost artifact(s)" if ghosts else ""
-max_behind = thresholds.get("max_behind", "?")
+max_behind = thresholds["max_behind"]
 print(
     f"ok: all {total} deployed artifacts match their committed HEAD within "
     f"{max_behind} commits{ghost_note} "

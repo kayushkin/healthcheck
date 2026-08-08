@@ -25,6 +25,11 @@
 # number so the gap stays visible and shrinks, but a red-from-day-one check is a
 # check people learn to ignore — and an ignored guard is worse than no guard.
 #
+# And it refuses a sweep that JUDGED nothing — ok + failed of zero, counted
+# rather than the repos_total the sweep merely looked at. Such a sweep writes
+# no `aborted` and no `only`, so every check above passes in turn and this
+# file used to print "ok: 0/0" and exit 0.
+#
 # Prints a line containing "ok" (healthcheck's expect_output) and exits 0 when
 # the last sweep was clean and recent; otherwise prints why and exits 1.
 
@@ -94,6 +99,23 @@ if age_hours > max_age:
         f"(max {max_age:.0f}h). Nothing is checking that the committed binaries "
         f"still boot."
     )
+    sys.exit(1)
+
+if ok + failed == 0:
+    # Judged, not merely SEEN. repos_total counts every repo the sweep looked at,
+    # including the unguarded ones it could not judge at all, so it is the wrong
+    # quantity to gate on: a sweep in which every repo came back unguarded prints
+    # a repos_total the reader is happy with and an ok count of zero. This check
+    # was written against repos_total first and the selftest caught it — an --elf
+    # sweep of an empty root reports repos_total=1 having scanned nothing, because
+    # the unmatched glob is swept as a repo literally named *.
+    #
+    # A sweep that judged nothing is not a clean fleet. It writes no `aborted` and
+    # no `only`, so every check above passes in turn and this file used to print
+    # "ok: 0/0" and exit 0 — the --only defect without the flag. It needs no bug to
+    # reach: the root comes from REPOS_DIR, and this guard runs from a systemd unit
+    # whose Environment has already been wrong twice.
+    print("FAIL: repo-smoke sweep judged 0 repositories, so nothing was checked.")
     sys.exit(1)
 
 if failed:
