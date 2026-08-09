@@ -116,12 +116,23 @@ def repositories(root):
     Enumerated from the filesystem rather than from repo-store (:8306), and that
     is a measured choice, not laziness. repo-store is the canonical registry of
     repo IDENTITY — languages, frameworks, build tags — and it is the right join
-    target for those. It is not a census: checked 2026-08-09 it holds 75 rows
-    against 78 real repositories, missing chat-core, event-store, producer,
-    renodmv-cli and repodetect, and carrying two rows (memory, sessions) for
-    directories that are not repositories at all. A fleet scan enumerated from
-    it would silently skip five repos — which is this script's own bug wearing a
-    different hat, so it is the one enumeration this file must not use.
+    target for those. It is not a census.
+
+    Checked 2026-08-09 it held 75 rows against 78 real repositories, missing
+    five and carrying two for directories that are not repositories. Those seven
+    were corrected the same day, so the counts agree as this is written — and
+    that is exactly why the reason has to be stated as something other than a
+    count. repo-store has NO INGEST: no walk, no scan route, no cron job, no
+    seed script. Every row it holds was posted by hand, and the 75 were posted
+    in a single two-second window on 2026-06-26 that was never repeated. It is
+    therefore accurate only until the next repository is created, with nothing
+    to notice when that happens.
+
+    A fleet scan enumerated from it inherits that blind spot — which is this
+    script's own bug wearing a different hat, so it is the one enumeration this
+    file must not use. Revisit when population becomes an ingest rather than an
+    act; `repo-store/scripts/registry-drift.sh` is what reports the gap, and
+    agreement on the day you check it is not evidence the gap cannot reopen.
 
     Linked worktrees are excluded: `~/repos/scheduler-wt-ask` and its siblings
     are checkouts OF scheduler, not repositories beside it, and counting them
