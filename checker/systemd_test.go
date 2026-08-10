@@ -20,6 +20,25 @@ func userManagerReachable(t *testing.T) {
 	}
 }
 
+// liveUnitIsActive answers whether this host is really running the unit the
+// live-unit tests assert against, and it asks systemd rather than asking
+// checkSystemd.
+//
+// Those tests used to take checkSystemd's own error as the signal that the unit
+// was down and skip on it. That is the same question only for as long as
+// checkSystemd is correct, and telling whether it is correct is the entire
+// reason the tests exist. Measured 2026-08-10: inverting one comparison in
+// checkSystemd so that every active unit reports as down — the defect that
+// would drive auto_restart at healthy services — turned both tests into
+// `--- SKIP` and left the whole repository green.
+func liveUnitIsActive(t *testing.T, unit string) {
+	t.Helper()
+	out, err := exec.Command("systemctl", "--user", "is-active", unit+".service").Output()
+	if state := strings.TrimSpace(string(out)); state != "active" {
+		t.Skipf("%s.service is %q on this host (%v); the live-unit assertions need it running", unit, state, err)
+	}
+}
+
 // TestCheckSystemdDistinguishesMissingUnitFromStoppedUnit is the core property.
 // `systemctl is-active` prints "inactive" for BOTH a stopped unit and a unit
 // that does not exist, which is why a check pointed at the wrong systemd
@@ -110,19 +129,24 @@ func TestMisconfiguredCheckDoesNotDriveAutoRestart(t *testing.T) {
 // which is exactly why this code does not shell out to `cat`).
 func TestCheckSystemdReportsRealRunningUnit(t *testing.T) {
 	userManagerReachable(t)
+	liveUnitIsActive(t, "noteboard")
 
 	c := New(&Config{AlertThreshold: 3})
-	// noteboard is a --user unit and is expected up on this host.
+	// noteboard is a --user unit, and systemd has just confirmed it is active.
 	svc := ServiceConfig{Name: "noteboard", Type: "systemd", Unit: "noteboard"}
 
-	if err := c.checkSystemd(svc); err != nil {
-		t.Skipf("noteboard not running locally, cannot assert the happy path: %v", err)
+	err := c.checkSystemd(svc)
+	if err == nil {
+		return
 	}
-
+	// The unit is active, so any error here is checkSystemd getting it wrong.
+	// A not-found is called out separately because misreading a loaded unit as
+	// absent is what routes a healthy service to the phantom-unit path.
 	var notFound *UnitNotFoundError
-	if errors.As(error(nil), &notFound) {
-		t.Fatal("unreachable")
+	if errors.As(err, &notFound) {
+		t.Fatalf("checkSystemd reported the loaded, active unit %q as not-found: %v", svc.Unit, err)
 	}
+	t.Fatalf("checkSystemd rejected the active unit %q: %v", svc.Unit, err)
 }
 
 // TestAutoRestartIsBounded pins the second half of the crash-loop class. The
@@ -234,11 +258,12 @@ func TestFlappingUnitCannotRefillItsRestartBudget(t *testing.T) {
 // every service that has ever flapped.
 func TestAutoRestartBudgetRearmsAfterRecovery(t *testing.T) {
 	userManagerReachable(t)
+	liveUnitIsActive(t, "noteboard")
 
 	c := New(&Config{AlertThreshold: 1})
 	svc := ServiceConfig{Name: "noteboard", Type: "systemd", Unit: "noteboard", AutoRestart: true}
 	if err := c.checkSystemd(svc); err != nil {
-		t.Skipf("noteboard not running locally, cannot drive a real recovery: %v", err)
+		t.Fatalf("checkSystemd rejected the active unit %q, so no real recovery can be driven: %v", svc.Unit, err)
 	}
 
 	c.states[svc.Name] = &ServiceState{
