@@ -209,7 +209,19 @@ def main():
         return meta[name]
 
     rows, cards_with_literals, greps, base_cache = [], 0, 0, {}
-    for t in todos:
+
+    # Progress to stderr, so `> out.txt` still captures a clean report while a
+    # human watching the terminal can see it is alive. This run is tens of
+    # thousands of `git grep` invocations and takes tens of minutes; the first
+    # version printed nothing until the end, which is indistinguishable from a
+    # hang and cost the pass that wrote it two needless restarts.
+    def progress(n, total):
+        if n % 25 == 0 or n == total:
+            print(f"  ...{n}/{total} cards, {len(rows)} rows, {greps} greps",
+                  file=sys.stderr, flush=True)
+
+    for n, t in enumerate(todos, 1):
+        progress(n, len(todos))
         text = (t.get("title") or "") + "\n" + (t.get("body") or "")
         named = [r for r in repos if re.search(rf"\b{re.escape(r)}\b", text)]
         # Prefer the longest repo name matched: "llm-bridge-copilotcli" contains
