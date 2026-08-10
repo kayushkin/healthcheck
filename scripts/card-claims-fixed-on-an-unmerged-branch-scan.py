@@ -149,8 +149,21 @@ def merge_base(repo, default, branch):
     return out.strip()
 
 
-def branch_removed(repo, default, branch, literal, base_cache):
-    """The files THIS branch stopped carrying the literal in; empty when none.
+def branch_removed(repo, default, branch, literal, base_cache, default_files):
+    """Files where the branch removed the literal AND the default still has it.
+
+    The intersection with default_files is not a refinement, it is the question.
+    A branch can have deleted a line that the default branch has since deleted
+    too, independently, after the fork -- and then there is nothing left to fix
+    and nothing to tell anyone. Measured: card 4e7aba91 is about unbounded
+    `bufio.NewScanner` loops, and feat/session-bundle-resolver dropped that call
+    from internal/harness/process.go. So did main, which reads
+    `ndjson.ReadLine(reader, ndjson.MaxLineBytes)` today. Reported as the scan's
+    only NEW row and it was already fixed everywhere.
+
+    The whole-repo "is it on default at all" gate cannot catch this: bufio.NewScanner
+    survives in other files of the same repo, so the gate passes and the per-file
+    comparison then answers a question about the merge base alone.
 
     `git branch --no-merged` says a branch is not contained in the default -- it
     does NOT say the branch is up to date with it. A branch that forked before a
@@ -170,7 +183,8 @@ def branch_removed(repo, default, branch, literal, base_cache):
     base = base_cache[key]
     if not base:
         return set()
-    return files_with_literal(repo, base, literal) - files_with_literal(repo, branch, literal)
+    removed = files_with_literal(repo, base, literal) - files_with_literal(repo, branch, literal)
+    return removed & default_files
 
 
 def main():
@@ -238,12 +252,14 @@ def main():
                 continue
             for lit in literals:
                 greps += 1
-                if not files_with_literal(repos[rname], default, lit):
+                default_files = files_with_literal(repos[rname], default, lit)
+                if not default_files:
                     continue  # not this repo's line, or already gone everywhere
                 gone_on, where = [], set()
                 for br in branches:
                     greps += 2
-                    removed = branch_removed(repos[rname], default, br, lit, base_cache)
+                    removed = branch_removed(repos[rname], default, br, lit, base_cache,
+                                             default_files)
                     if removed:
                         gone_on.append(br)
                         where |= removed
@@ -275,7 +291,9 @@ def main():
                           capture_output=True).returncode != 0:
             control = f"unavailable (branch {cbr} is gone)"
         else:
-            removed = branch_removed(cr, default_branch(cr), cbr, clit, base_cache)
+            cdef = default_branch(cr)
+            removed = branch_removed(cr, cdef, cbr, clit, base_cache,
+                                     files_with_literal(cr, cdef, clit))
             control = (f"FIRED (removed from {', '.join(sorted(removed))})" if removed
                        else "DID NOT FIRE -- the scan cannot see its own motivating case")
 
@@ -302,11 +320,13 @@ def main():
 
     for card, rs in sorted(by_card.items(), key=lambda kv: (any(x["card_knows"] for x in kv[1]),
                                                             -len(kv[1]))):
-        flag = "KNOWN" if any(r["card_knows"] for r in rs) else "  NEW"
-        print(f"[{flag}] {card[:8]}  {rs[0]['title'][:92]}")
+        print(f"{card[:8]}  {rs[0]['title'][:98]}")
         for r in rs:
-            print(f"    {r['repo']}: on {r['default']}, GONE on {len(r['gone_on'])}/{r['of']} "
-                  f"unmerged branch(es)")
+            # Per ROW, never per card. A card with one known row and one unknown
+            # row was printed KNOWN, which hid the row that was actually news.
+            flag = "KNOWN" if r["card_knows"] else "  NEW"
+            print(f"  [{flag}] {r['repo']}: on {r['default']}, GONE on "
+                  f"{len(r['gone_on'])}/{r['of']} unmerged branch(es)")
             print(f"      literal: {r['literal']}")
             print(f"      removed from: {', '.join(r['files'])}")
             print(f"      branches: {', '.join(r['gone_on'][:6])}"
