@@ -184,11 +184,40 @@ if scanned != total + excluded:
 if failed:
     # No single quotes anywhere in this block: it is embedded in a single-quoted
     # shell string, and a nested one silently ends it.
-    broken = ", ".join(
-        [f.get("repo", "?") + " (go " + f.get("stage", "?") + ")"
-         for f in report.get("failures", [])]
-    )
-    print(f"FAIL: {failed} repo(s) do not build from a clean clone of HEAD: {broken}")
+    # Name the stage that actually failed, rather than asserting "do not build".
+    #
+    # The sweep runs build, then vet, then — under --with-tests — test, and it
+    # stamps the failing stage on every row. This sentence used to say "do not
+    # build from a clean clone of HEAD" no matter which of the three broke, while
+    # printing the real stage in the same breath. Measured 2026-08-14 by feeding
+    # this reader a --with-tests report: it printed
+    #
+    #   FAIL: 1 repo(s) do not build from a clean clone of HEAD: argraphments (go test)
+    #
+    # about a repo that builds and vets clean and fails only its tests. The line
+    # contradicted itself, and the half a human acts on was the false half — it
+    # sends a reader looking for a compile error that is not there.
+    #
+    # This is the same defect the --only refusal above exists to prevent, in a
+    # different direction: there, a report covering a SMALLER population could
+    # pass for the fleet verdict; here, a report covering MORE STAGES gets
+    # described as though it covered only the first. A report that judged more
+    # than building is not wrong to read, it is wrong to paraphrase.
+    stages_failed = sorted({f.get("stage", "?") for f in report.get("failures", [])})
+    if stages_failed == ["build"]:
+        verb = "do not build from a clean clone of HEAD"
+    else:
+        verb = "fail from a clean clone of HEAD at go " + ", go ".join(stages_failed)
+    # When every failure broke at the same stage the verb already names it, so
+    # repeating it per repo is noise. When they differ, each repo needs its own.
+    if len(stages_failed) == 1:
+        broken = ", ".join([f.get("repo", "?") for f in report.get("failures", [])])
+    else:
+        broken = ", ".join(
+            [f.get("repo", "?") + " (go " + f.get("stage", "?") + ")"
+             for f in report.get("failures", [])]
+        )
+    print(f"FAIL: {failed} repo(s) {verb}: {broken}")
     sys.exit(1)
 
 # The coverage figure is printed, not merely reconciled. The identity above

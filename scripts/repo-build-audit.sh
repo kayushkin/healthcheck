@@ -34,25 +34,65 @@
 # ⚠️ The second half of that rationale used to read "several repos' suites need
 # live services or credentials, so gating on them would make the guard cry wolf
 # nightly". That claim was never measured, and on 2026-08-08 it was, by running
-# this guard with --with-tests across the whole fleet. It is FALSE:
+# this guard with --with-tests across the whole fleet. It is FALSE, and it is
+# still false:
 #
-#   70 of 71 repos pass `go test ./...` from a clean clone of HEAD (430s total).
+#   Not one suite needs a live service or a credential. Every candidate turned
+#   out to be a t.Skip on the unset env var (inber/agent, inber/conversation), a
+#   //go:build integration tag that `go test ./...` never selects at all
+#   (llm-bridge-hermes), an httptest fake, a port number asserted as a string
+#   literal (forge, permission-store, redact), or a test written to tolerate the
+#   service being absent (inber/server TestEventPublisherCreation).
 #
-# Not one suite needs a live service or a credential. Every candidate turned out
-# to be a t.Skip on the unset env var (inber/agent, inber/conversation), a
-# //go:build integration tag that `go test ./...` never selects at all
-# (llm-bridge-hermes), an httptest fake, a port number asserted as a string
-# literal (forge, permission-store, redact), or a test written to tolerate the
-# service being absent (inber/server TestEventPublisherCreation).
+# ⚠️ But the COUNT that used to sit here — "70 of 71 repos pass, 430s, the single
+# red is argraphments" — was written undated, and it decayed in three days. Two
+# reds it does not mention arrived after it was taken. Re-measured:
 #
-# The single red is argraphments, and it is a TRUE defect, not a wolf: three
-# tests assert on static/dist/index.html, which is gitignored and which nothing
-# in the committed tree builds. See noteboard for the measurement and the fork.
+#   2026-08-08:  70 of 71 pass `go test ./...` from a clean clone of HEAD (430s)
+#   2026-08-14:  68 of 72 pass `go test ./...` from a clean clone of HEAD (531s,
+#                go1.26.0). Red: argraphments, job-store, logstack, and one flake.
 #
-# So the exclusion now rests on ONE honest reason rather than two: turning this
-# on would paint the guard red until argraphments is fixed, and a guard everyone
-# has learned to ignore is worse than no guard at all. Fix that repo and the
-# cost of `stages+=(test)` by default is, as measured, zero red repos.
+# Put the date IN the sentence. A fleet number is a measurement, not a fact, and
+# an undated one goes on being quoted long after it stops being true.
+#
+# The four reds are four DIFFERENT things, and only the first is a plain defect:
+#
+#   argraphments — a TRUE defect, unchanged since 2026-08-08. Three tests assert
+#   on static/dist/index.html, which is gitignored and which nothing in the
+#   committed tree builds. See noteboard for the measurement and the fork.
+#
+#   job-store — a WOLF, and a kind the sentence above never contemplated. Its
+#   suite needs neither a service nor a credential; it needs a BUILD TAG. The
+#   repo says so in its README, Makefile, deploy.sh and smoke ("go test -tags
+#   sqlite_fts5 ./..."), and it is green that way from a clean clone — verified.
+#   This guard builds with DEFAULT flags on purpose, so it runs the one
+#   invocation the repo documents as wrong. The 2026-08-08 refutation disposed of
+#   a specific WORDING (services, credentials); the general objection it was
+#   standing in for — some suites cannot pass the plain invocation — survived it
+#   and now has an instance.
+#
+#   logstack — red with NO COMMIT. Nothing in that repo changed; seedCorpus
+#   stamped its fixture 2026-07-12 and the fixture aged out of a query window
+#   read off time.Now() on 2026-08-11. This is the strongest argument FOR the
+#   gate on this page: the class of defect `go test` catches and `go vet` cannot
+#   includes ones that arrive on a DATE rather than in a diff, which is invisible
+#   to every guard that reruns on change. (Fixed on an unmerged branch, so a
+#   clean clone of HEAD — main or the checked-out branch — is still red.)
+#
+#   llm-bridge-server — a FLAKE. Red in the full sweep at 237s, green on re-run
+#   through this same code path at 140s and green 4-for-4 uncached in isolation.
+#   Load-sensitive, and the full sweep was sharing the box. It is recorded here
+#   because a single measurement CANNOT SEE flakiness at all: run the fleet once
+#   and a flaky suite is indistinguishable from a broken one, which is the whole
+#   cry-wolf question this comment keeps trying to answer with one number.
+#
+# So the exclusion still rests on ONE honest reason: turning this on would paint
+# the guard red, and a guard everyone has learned to ignore is worse than no
+# guard at all. But the old closing line — "fix that repo and the cost is, as
+# measured, zero red repos" — is FALSE as measured today. Fixing argraphments
+# alone leaves job-store (which wants a decision about tags, not a fix) and
+# logstack (which wants a merge). Anyone turning this on should re-measure
+# first and expect the number to have moved again.
 #
 # Tier 2: --smoke
 # ---------------
@@ -1182,7 +1222,26 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
     rc=$?
     if [ "$rc" -ne 0 ]; then
       status="fail"; stage="$s"
-      detail=$(echo "$STAGE_OUT" | grep -v '^#' | grep -v '^$' | head -6 | tr '\n' ' ' | cut -c1-500)
+      # `head -6` is right for build and vet, whose output STARTS with the error,
+      # and wrong for test, whose output starts with one line per PASSING package.
+      # Measured 2026-08-14 on a --with-tests sweep: two of the four red repos
+      # recorded detail "?" — the first six lines were
+      # `?   github.com/…/cmd/foo  [no test files]`, so the report described a
+      # failing repo with a list of its successes and named no failing test at all.
+      # A report that truncates to the happy path is worse than one that truncates
+      # at random: it reads as evidence that nothing is wrong.
+      #
+      # So for test, select the lines that CARRY the failure and fall back to the
+      # old behaviour if none match, which keeps a panic or a build error inside
+      # the test tree from producing an empty detail.
+      if [ "$s" = "test" ]; then
+        detail=$(echo "$STAGE_OUT" \
+          | grep -E '^(--- FAIL|FAIL|panic:|[[:space:]]+[^[:space:]]+_test\.go:)' \
+          | head -6 | tr '\n' ' ' | cut -c1-500)
+      fi
+      if [ "$s" != "test" ] || [ -z "$detail" ]; then
+        detail=$(echo "$STAGE_OUT" | grep -v '^#' | grep -v '^$' | head -6 | tr '\n' ' ' | cut -c1-500)
+      fi
       [ "$rc" -eq 124 ] && detail="timed out after ${STAGE_TIMEOUT}s"
       break
     fi
