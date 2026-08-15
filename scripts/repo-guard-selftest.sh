@@ -5,7 +5,7 @@
 #
 # It started as a test of one sweep's repository-discovery rules and grew, one
 # finding at a time, to cover both sweep scripts (repo-build-audit.sh in its
-# four modes, and repo-deploy-audit.sh) and all six status readers. Renamed
+# five modes, and repo-deploy-audit.sh) and all seven status readers. Renamed
 # 2026-08-08, when the deploy cases landed and the old name named one of the two
 # scripts it tests. Nothing invokes this file but a human, so the rename cost
 # only this comment — see the note about that at the foot of the file.
@@ -31,8 +31,9 @@
 #
 # Usage: scripts/repo-guard-selftest.sh     (exit 0 = all pinned)
 #
-# ⚠️ NOTHING RUNS THIS. Measured 2026-08-08: no scheduler job invokes it, and
-# healthcheck's config.yaml declares no check for it, while the five guards it
+# ⚠️ NOTHING RUNS THIS. Measured 2026-08-08, still true 2026-08-15: no scheduler
+# job invokes it, and healthcheck's config.yaml declares no check for it, while
+# the six guards it
 # pins all run nightly under the scheduler. So every assertion here is a claim
 # that is only true on the last day somebody typed the command. Tracked as its
 # own todo rather than fixed in passing, because putting it on a schedule is a
@@ -364,7 +365,7 @@ check "only: a full sweep records an empty filter, and records it" \
 # Each status reader picks its report by PATH. The sweep picks its mode from a
 # flag and its path from REPORT=, independently, so the pairing can be wrong —
 # and writing to your own REPORT= path is exactly what the --only finding above
-# tells you to do when running a guard by hand. The four modes name their counts
+# tells you to do when running a guard by hand. The five modes name their counts
 # alike (repos_total, ok, failed, unguarded), so a mismatched pair did not error,
 # it went GREEN over a run that measured something else: fed the elf report, the
 # build reader announced "78/81 repos build from a clean clone of HEAD" for a
