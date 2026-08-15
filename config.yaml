@@ -294,6 +294,35 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-elf-status.sh"]
     expect_output: "ok"
 
+  # Tier 1, a fifth axis, and the mirror of the one above: --elf asks whether a
+  # file that was never source got committed, --nul asks whether a file that IS
+  # source is still readable as text.
+  #
+  # One raw NUL byte makes the whole file binary to every content search on this
+  # box, and it fails in the direction of "nothing here". The `grep` every agent
+  # runs is a ugrep wrapper invoked with -I (skip binary files), so an offending
+  # file answers every query with zero matches, no error and no warning; file(1)
+  # calls it `data`; git cannot diff it. A search returning zero because the file
+  # is binary is indistinguishable from one returning zero because the pattern is
+  # absent, so every census phrased as "grep found N" silently excluded it.
+  #
+  # Two files carried one for three weeks each — chat-core's otelDedup.ts from
+  # 2026-07-27 and bridge-ui's signalData.ts from 2026-07-31, both composite-key
+  # separators written as a literal byte instead of an escape. What eventually
+  # noticed was a sweep whose own ranking was a grep count that could not see the
+  # file it most needed. Nothing was watching for a third.
+  #
+  # Same shape as the guards above: the fleet-wide HEAD scan runs nightly under
+  # the scheduler (repo-nul-guard job) and leaves its verdict in nul-report.json;
+  # this check only reads it. Scoped to source extensions, since a NUL in a .png
+  # is not a defect and a committed binary is already --elf's axis. Generated
+  # trees are named in the report but not failed — a bundle only ever carries one
+  # because a source file upstream does.
+  - name: repo-nul-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-nul-status.sh"]
+    expect_output: "ok"
+
   # A different axis from the four above: those watch repos, this watches the
   # session table. Every session row carries type (how it runs), purpose (what it
   # does) and origin (who created it). All three are load-bearing — permission

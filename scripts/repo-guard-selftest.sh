@@ -110,6 +110,13 @@ run_wt --elf "$ROOT/wt-elf.json" >/dev/null
 check "elf: the worktree is not scanned as a second repo" \
       "1" "$(report_field "$ROOT/wt-elf.json" 'd["repos_total"]')"
 
+# --nul walks the same directory set as --elf, so it inherits the same trap: a
+# linked worktree shares the repository's HEAD, and scanning it twice would
+# double every count and report one offending file as two.
+run_wt --nul "$ROOT/wt-nul.json" >/dev/null
+check "nul: the worktree is not scanned as a second repo" \
+      "1" "$(report_field "$ROOT/wt-nul.json" 'd["repos_total"]')"
+
 run_wt "" "$ROOT/wt-build.json" >/dev/null
 check "build: the worktree is not built as a second repo" \
       "1" "$(report_field "$ROOT/wt-build.json" 'd["repos_total"]')"
@@ -490,6 +497,16 @@ check "coverage: elf judges every directory, so its two counts agree" \
       "3 4" \
       "$(report_field "$ROOT/cov-elf.json" 'str(d["repos_total"]) + " " + str(d["directories_scanned"])')"
 check "coverage: the elf accounting closes" "0" "$(identity "$ROOT/cov-elf.json")"
+
+# --nul filters on worktrees alone, exactly as --elf does, so its denominator is
+# the directory count too. Pinned separately rather than assumed from the elf
+# pair: they are two sweeps, and a filter added to one and not the other is
+# precisely the kind of drift the identity exists to surface.
+REPOS_DIR="$COV" REPORT="$ROOT/cov-nul.json" bash "$AUDIT" --nul >/dev/null 2>&1
+check "coverage: nul judges every directory, so its two counts agree" \
+      "3 4" \
+      "$(report_field "$ROOT/cov-nul.json" 'str(d["repos_total"]) + " " + str(d["directories_scanned"])')"
+check "coverage: the nul accounting closes" "0" "$(identity "$ROOT/cov-nul.json")"
 
 # --only is the fourth route out of the sweep, and it has to be counted for the
 # identity to be an invariant rather than a property of full sweeps only. If it
@@ -959,6 +976,145 @@ else
   echo "SKIP  deploy status branch fixture (no go toolchain)"
 fi
 
+# -------------------------------------------------------------- fixture NUL
+# --nul asks whether a committed SOURCE file has gone binary. One raw NUL byte
+# is enough: the `grep` every agent on this box runs is a ugrep wrapper invoked
+# with -I, so the file then answers every content search with zero matches, no
+# error and no warning, and a census phrased as "grep found N" silently excludes
+# it. Two files on this box carried one for three weeks each.
+#
+# ⚠️ Every NUL below is written by python from an ESCAPE, never typed as a
+# literal byte into this file. That is not fastidiousness: the first draft of
+# the in-repo scan that found the original defect walked `src/` alone, and
+# writing the next line of that draft copied a raw NUL into the scanning file
+# itself, which then sat green while being binary and unsearchable. A selftest
+# for this guard is the single file most likely to acquire the defect it tests
+# for, and it would do so invisibly — `cat`, an editor and a diff all draw a NUL
+# as nothing at all.
+NUL="$ROOT/nul-fixture"
+mkdir -p "$NUL"
+
+# make_nul_repo <dir> <relative path> <clean|withnul>
+# The file is written by python so the byte comes from an escape. A repo with
+# no path argument gets a committed HEAD and no source file at all.
+make_nul_repo() {
+  local dir="$1" relpath="${2:-}" kind="${3:-clean}"
+  mkdir -p "$dir"
+  git -C "$dir" init -q .
+  git -C "$dir" config user.email selftest@localhost
+  git -C "$dir" config user.name selftest
+  if [ -n "$relpath" ]; then
+    mkdir -p "$dir/$(dirname "$relpath")"
+    DEST="$dir/$relpath" KIND="$kind" python3 -c '
+import os
+payload = b"package main\n\nfunc main() {}\n"
+if os.environ["KIND"] == "withnul":
+    # The real shape: a composite key built with a literal separator instead of
+    # the escape. One byte, mid-file, invisible in every normal rendering.
+    payload = b"package main\n\nconst sep = \"a\x00b\"\n"
+with open(os.environ["DEST"], "wb") as fh:
+    fh.write(payload)
+'
+  fi
+  # Something to commit even when there is no source file, so HEAD resolves.
+  printf 'fixture\n' > "$dir/.keep"
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm init
+}
+
+make_nul_repo "$NUL/nulclean"     "main.go"                 clean
+make_nul_repo "$NUL/nuldirty"     "internal/key.go"         withnul
+make_nul_repo "$NUL/nulgenerated" "dist/assets/bundle.js"   withnul
+
+# A NUL in a .png is not a defect, and a committed compiled binary is --elf's
+# job. Written the same way so the fixture cannot drift from the others.
+mkdir -p "$NUL/nulimage"
+git -C "$NUL/nulimage" init -q .
+git -C "$NUL/nulimage" config user.email selftest@localhost
+git -C "$NUL/nulimage" config user.name selftest
+DEST="$NUL/nulimage/logo.png" python3 -c '
+import os
+with open(os.environ["DEST"], "wb") as fh:
+    fh.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00")
+'
+git -C "$NUL/nulimage" add -A
+git -C "$NUL/nulimage" commit -qm init
+
+REPOS_DIR="$NUL" REPORT="$ROOT/nul.json" bash "$AUDIT" --nul >/dev/null 2>&1
+
+# The positive control, and it comes first. Every other assertion in this
+# section is about the guard declining to fire; none of them is worth anything
+# until the guard is shown able to fire at all. A scan that reads no bytes would
+# satisfy all of them.
+check "nul: a raw NUL in a committed source file is a failure" \
+      "1 nuldirty" \
+      "$(report_field "$ROOT/nul.json" 'str(d["failed"]) + " " + ",".join(f["repo"] for f in d["failures"])')"
+check "nul: the failure names the file and the byte count, not just the repo" \
+      "yes" \
+      "$(report_field "$ROOT/nul.json" '"yes" if "internal/key.go (1 NUL)" in d["failures"][0]["detail"] else repr(d["failures"][0]["detail"])')"
+check "nul: a source file with no NUL passes" \
+      "ok" \
+      "$(report_field "$ROOT/nul.json" '[r["status"] for r in d["results"] if r["repo"] == "nulclean"][0]')"
+
+# Scoping, both directions. Each of these would be a false positive that makes
+# the guard noise, and noise is how a guard earns being ignored.
+check "nul: a NUL in a .png is not a source defect — that is --elf's axis" \
+      "ok" \
+      "$(report_field "$ROOT/nul.json" '[r["status"] for r in d["results"] if r["repo"] == "nulimage"][0]')"
+check "nul: a NUL in a generated tree does not fail the repo" \
+      "ok" \
+      "$(report_field "$ROOT/nul.json" '[r["status"] for r in d["results"] if r["repo"] == "nulgenerated"][0]')"
+# ...but it is NAMED. Excluding it silently would be the same defect the whole
+# family refuses: the reader could not tell "no generated blob carries one" from
+# "the mode does not look at generated blobs".
+check "nul: a generated blob carrying a NUL is named in the report, not dropped" \
+      "nulgenerated/dist/assets/bundle.js 1" \
+      "$(report_field "$ROOT/nul.json" '" ".join([d["generated_with_nul"][0]["path"], str(d["generated_with_nul"][0]["nul_count"])]) if d.get("generated_with_nul") else "MISSING"')"
+
+check "nul: the accounting closes" "0" "$(identity "$ROOT/nul.json")"
+
+# The floor, and the fixture that makes it testable. `nulempty` has a committed
+# HEAD and not one file with a source extension, so the sweep judges it — ok+
+# failed is non-zero and every other refusal in the reader passes in turn —
+# while reading zero bytes of source.
+#
+# This is the failure mode unique to this guard: a walk that opens no file finds
+# no NUL byte, so "scanned nothing" and "found nothing" produce an identical,
+# self-consistent, green report. It is the same equivalence a raw NUL creates in
+# a content search, which is why the guard has to refuse it about itself.
+FLOOR="$ROOT/nul-floor"
+mkdir -p "$FLOOR"
+make_nul_repo "$FLOOR/nulempty"
+REPOS_DIR="$FLOOR" REPORT="$ROOT/nul-floor.json" bash "$AUDIT" --nul >/dev/null 2>&1
+check "nul: a repo with no source file still gets judged, so no other refusal catches this" \
+      "1 0" \
+      "$(report_field "$ROOT/nul-floor.json" 'str(d["ok"] + d["failed"]) + " " + str(d["files_scanned"])')"
+floor_out=$(REPORT="$ROOT/nul-floor.json" MIN_FILES_SCANNED=5 bash "$HERE/repo-nul-status.sh" 2>&1)
+floor_rc=$?
+check "nul: the reader refuses a sweep that read no source instead of calling it a clean fleet" \
+      "1 yes" \
+      "$floor_rc $(case "$floor_out" in *"read only 0 source files"*) echo yes ;; *) echo "no: $floor_out" ;; esac)"
+# The other side of the floor: it must not refuse a sweep that DID read source.
+# Without this, a floor of infinity would pass the case above and break the guard
+# entirely — the refusal has to be shown selective, not merely present.
+green_out=$(REPORT="$ROOT/nul.json" MIN_FILES_SCANNED=2 bash "$HERE/repo-nul-status.sh" 2>&1)
+check "nul: the floor does not refuse a sweep that did read source" \
+      "no" \
+      "$(case "$green_out" in *"read only"*) echo "yes: $green_out" ;; *) echo no ;; esac)"
+
+# A --nul report fed to a sibling reader must be refused on mode, and vice
+# versa. The sweep takes its mode from a flag and its path from REPORT=, so the
+# pairing can be wrong, and a mismatched report names repos for a defect they do
+# not have.
+mismatch_out=$(REPORT="$ROOT/nul.json" bash "$HERE/repo-elf-status.sh" 2>&1)
+check "nul: the elf reader refuses a --nul report rather than reading its counts" \
+      "yes" \
+      "$(case "$mismatch_out" in *"not an --elf report"*) echo yes ;; *) echo "no: $mismatch_out" ;; esac)"
+mismatch_out=$(REPORT="$ROOT/cov-elf.json" bash "$HERE/repo-nul-status.sh" 2>&1)
+check "nul: the nul reader refuses an --elf report rather than reading its counts" \
+      "yes" \
+      "$(case "$mismatch_out" in *"not a --nul report"*) echo yes ;; *) echo "no: $mismatch_out" ;; esac)"
+
 # ------------------------------------------------------ fixture EMPTY SWEEP
 # The sweep does not treat "discovered nothing" as a refusal. An empty repos root
 # exits 0 and writes repos_total=0 with no `aborted` and no `only`, so every check
@@ -971,7 +1127,8 @@ EMPTY="$ROOT/empty-root"
 mkdir -p "$EMPTY"
 for mode_reader in ":build:repo-build-audit-status.sh" \
                    "--smoke:smoke:repo-smoke-status.sh" \
-                   "--elf:elf:repo-elf-status.sh"; do
+                   "--elf:elf:repo-elf-status.sh" \
+                   "--nul:nul:repo-nul-status.sh"; do
   flag="${mode_reader%%:*}"; rest="${mode_reader#*:}"
   tag="${rest%%:*}"; reader="${rest#*:}"
   # shellcheck disable=SC2086

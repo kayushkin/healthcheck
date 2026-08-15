@@ -210,9 +210,48 @@
 # It reads HEAD via `git cat-file --batch` (one process per repo, not per blob),
 # so it needs no toolchain at all — not go, not node.
 #
+# Hygiene: --nul
+# --------------
+# --elf asks whether a file that was never source got committed. --nul asks the
+# mirror question, and it is the worse one: is a file that IS source no longer
+# readable as text?
+#
+# A single raw NUL byte makes the whole file binary to every content search on
+# this box, and the failure is silent in the direction of "nothing here":
+#
+#   - `file(1)` reports it as `data`, not as source.
+#   - The `grep` every agent here runs is a ugrep wrapper invoked with `-I`
+#     (skip binary files). `grep -c import` on the offending file returned
+#     NOTHING and exit 1, while `command grep -c` on the same file found 3
+#     matches. No error, no warning, not even ugrep's own "binary file matches".
+#   - `git` cannot diff it: the fix commit's stat line reads `Bin 5112 -> 6141`.
+#
+# So a search that returns zero because the file is binary is indistinguishable
+# from one that returns zero because the pattern is absent, and every fleet
+# census in this backlog phrased as "measured: grep found N" silently excluded
+# such a file. It is not theoretical: it hit the sweep that found it, whose own
+# ranking was a grep count that could not see the file it most needed.
+#
+# Two files on this box had carried one for weeks — `chat-core`'s
+# `src/reduce/otelDedup.ts` since 2026-07-27 and `bridge-ui`'s
+# `src/components/chat/signalData.ts` since 2026-07-31 — both as composite-key
+# separators written as a literal byte instead of the `\u0000` escape. Each got
+# its own in-repo scan when it was fixed. This mode is the fleet-wide one, so
+# that a THIRD file is caught the night it lands rather than three weeks later.
+#
+# Scoped to SOURCE extensions (see SOURCE_EXTENSIONS below), because a NUL in a
+# .png is not a defect and a committed compiled binary is already --elf's job.
+#
+# Generated output (node_modules/, dist/, vendor/) is scanned but reported
+# SEPARATELY rather than failed: a minified bundle carrying a NUL is a true
+# observation, but the fix for it is always upstream in the source file that
+# produced it, and a guard that is permanently red for something outside its
+# remit is a guard people learn to ignore. Named rather than dropped, which is
+# this family's house rule for every exclusion — see the coverage identity.
+#
 # Consumed by scripts/repo-build-audit-status.sh, scripts/repo-smoke-status.sh,
-# scripts/repo-node-status.sh and scripts/repo-elf-status.sh, which healthcheck
-# polls.
+# scripts/repo-node-status.sh, scripts/repo-elf-status.sh and
+# scripts/repo-nul-status.sh, which healthcheck polls.
 
 set -uo pipefail
 
@@ -256,6 +295,7 @@ while [ $# -gt 0 ]; do
     --smoke) MODE=smoke ;;
     --node) MODE=node ;;
     --elf) MODE=elf ;;
+    --nul) MODE=nul ;;
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
@@ -277,6 +317,7 @@ case "$MODE" in
   smoke) REPORT="${REPORT:-$STATE_DIR/smoke-report.json}" ;;
   node)  REPORT="${REPORT:-$STATE_DIR/node-report.json}" ;;
   elf)   REPORT="${REPORT:-$STATE_DIR/elf-report.json}" ;;
+  nul)   REPORT="${REPORT:-$STATE_DIR/nul-report.json}" ;;
   *)     REPORT="${REPORT:-$STATE_DIR/report.json}" ;;
 esac
 
@@ -352,14 +393,15 @@ if [ -x "$MISE_BIN" ]; then
     [ -n "$real" ] && export PATH="$(dirname "$real"):$PATH"
   done
 fi
-# --elf reads committed blobs with git alone, so it needs no language toolchain.
+# --elf and --nul read committed blobs with git alone, so they need no language
+# toolchain.
 if [ "$MODE" = "node" ]; then
   if ! command -v npm >/dev/null 2>&1; then
     echo "FATAL: npm is not on PATH — cannot audit anything" >&2
     write_aborted_report "npm is not on PATH — no toolchain, nothing was audited"
     exit 2
   fi
-elif [ "$MODE" != "elf" ] && ! command -v go >/dev/null 2>&1; then
+elif [ "$MODE" != "elf" ] && [ "$MODE" != "nul" ] && ! command -v go >/dev/null 2>&1; then
   echo "FATAL: go is not on PATH — cannot audit anything" >&2
   write_aborted_report "go is not on PATH — no toolchain, nothing was audited"
   exit 2
@@ -750,6 +792,14 @@ fi
 results=()   # name<TAB>status<TAB>stage<TAB>seconds<TAB>detail
 total=0; ok=0; failed=0; unguarded=0
 no_smoke=0   # smoke mode only: repos with a committed HEAD but no smoke to run
+
+# nul mode only. `files_scanned` is the floor that stops this guard passing
+# vacuously: a walk that reads nothing finds no NUL bytes and reports a clean
+# fleet, and "0 files scanned" is precisely the shape of the failure being
+# tested for. The status reader refuses a report whose floor is not met, so the
+# number has to be carried rather than merely printed.
+files_scanned=0
+generated_with_nul=()   # "<repo>/<path>\t<nul count>" — named, never failed
 # node mode only: packages that install and build but declare no `check` script,
 # so nothing in this sweep executes an assertion about their behaviour. Named in
 # the report rather than counted as ok-and-done, for the same reason --smoke
@@ -1024,10 +1074,155 @@ print("; ".join(parts))
   done
 fi
 
-# The Go sweep. Skipped wholesale in --node and --elf modes, which walk their own
-# targets instead of go.mod and have already filled in results/counters above.
+if [ "$MODE" = "nul" ]; then
+  for path in "$REPOS_DIR"/*/; do
+    name=$(basename "$path")
+    if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then
+      skipped_by_only=$((skipped_by_only + 1)); continue
+    fi
+    is_linked_worktree "$path" && continue
+    total=$((total + 1))
+
+    if ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
+      # No committed HEAD, so there is nothing to scan. Reported rather than
+      # passed silently — the same call every other mode makes.
+      unguarded=$((unguarded + 1))
+      results+=("$name	unguarded	-	0	not a git repo — no committed HEAD to scan for NUL bytes")
+      echo "UNGUARDED $name (not a git repo)"
+      continue
+    fi
+
+    repo_start=$(date +%s)
+    # Output is one line per scanned repo of counts, then one line per hit:
+    #   "#	<scanned>	<generated_hits>"
+    #   "<path>	<nul count>	<source|generated>"
+    #
+    # ⚠️ Written in python reading raw bytes, NEVER with the harness `grep`.
+    # That wrapper runs with -I and skips binary files, so it is precisely the
+    # tool that cannot see this defect: pointing it at an offending file returns
+    # zero matches and exit 1, which is indistinguishable from a clean file.
+    #
+    # Reads committed blobs at HEAD, not the working tree, for the same reason
+    # --elf does: a NUL saved only on somebody's disk is not what a clone
+    # carries, and one already fixed in the tree but stale on disk must not read
+    # as still committed. It also means test trees, scripts and every other
+    # committed directory are in scope for free — which matters, because the
+    # first draft of the in-repo scan that found this walked `src/` alone, and
+    # writing the very next line of that draft copied a raw NUL into the
+    # scanning file itself. It sat green while the file making the assertion was
+    # binary and unsearchable. A guard that cannot see the tree it lives in is
+    # one that an editing slip switches off.
+    scan=$(REPO="$path" python3 -c '
+import os, subprocess, sys
+
+# Source extensions only. A NUL in a .png or a .ttf is not a defect, and a
+# committed compiled binary is --elf s job, not this one. Derived from what the
+# fleet actually commits rather than guessed: a survey of every blob at HEAD
+# across ~/repos on 2026-08-15 found .go .ts .tsx .md .sh .css .js .json .html
+# .py .sql .kt .svg .yaml .cjs .mjs .conf .xml .yml .txt .toml .kts .rs and
+# .service carrying real source, and the binary extensions below them (.png
+# .map .gz .ttf .ico .db) carrying none.
+SOURCE_EXTENSIONS = {
+    ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".sh", ".bash",
+    ".kt", ".kts", ".rs", ".java", ".rb", ".php", ".c", ".h", ".cpp", ".hpp",
+    ".sql", ".css", ".scss", ".less", ".html", ".htm", ".md", ".json", ".jsonl",
+    ".yaml", ".yml", ".toml", ".xml", ".svg", ".txt", ".conf", ".service",
+    ".properties", ".gradle", ".proto", ".tf", ".ini", ".cfg", ".env",
+}
+
+# Generated trees. A bundle here can carry a NUL, but only ever because a
+# source file upstream of it does, so failing on it would report the same
+# defect twice and stay red until somebody re-ran a build. Counted and named
+# separately instead. Measured 2026-08-15: five such blobs across dash, llmux
+# and bridge-ui/dist, every one of them a compiled copy of the same two source
+# files this mode was written for.
+GENERATED_DIRECTORIES = {"node_modules", "dist", "vendor"}
+
+repo = os.environ["REPO"]
+ls = subprocess.run(["git", "-C", repo, "ls-tree", "-r", "HEAD"],
+                    capture_output=True)
+if ls.returncode != 0:
+    sys.exit(0)
+entries = []  # (blob_hash, path, is_generated)
+for line in ls.stdout.decode("utf-8", "surrogateescape").splitlines():
+    meta, _, fpath = line.partition("\t")
+    parts = meta.split()
+    if len(parts) < 3 or parts[1] != "blob":
+        continue
+    if os.path.splitext(fpath)[1].lower() not in SOURCE_EXTENSIONS:
+        continue
+    generated = any(part in GENERATED_DIRECTORIES for part in fpath.split("/")[:-1])
+    entries.append((parts[2], fpath, generated))
+
+hits = []
+if entries:
+    proc = subprocess.Popen(["git", "-C", repo, "cat-file", "--batch"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    req = b"".join((h + "\n").encode() for h, _, _ in entries)
+    out = proc.communicate(req)[0]
+    i = 0
+    for _, fpath, generated in entries:
+        nl = out.index(b"\n", i)
+        header = out[i:nl].split()
+        i = nl + 1
+        # A blob header is "<hash> blob <size>"; anything else (a missing
+        # object) has no content section to skip. HEAD hashes always resolve,
+        # but be safe.
+        if len(header) < 3:
+            continue
+        size = int(header[2])
+        content = out[i:i + size]
+        i += size + 1  # trailing newline after the content
+        count = content.count(b"\x00")
+        if count:
+            hits.append((fpath, count, "generated" if generated else "source"))
+
+generated_hits = sum(1 for _, _, kind in hits if kind == "generated")
+print("#\t%d\t%d" % (len(entries), generated_hits))
+for fpath, count, kind in hits:
+    print("%s\t%d\t%s" % (fpath, count, kind))
+')
+    secs=$(( $(date +%s) - repo_start ))
+
+    scanned_here=$(printf '%s\n' "$scan" | awk -F'\t' '$1=="#"{print $2; exit}')
+    : "${scanned_here:=0}"
+    files_scanned=$((files_scanned + scanned_here))
+
+    # Every generated-tree hit, carried to the report so it is named rather than
+    # swallowed. It is not a failure — see GENERATED_DIRECTORIES above.
+    while IFS=$'\t' read -r fpath count kind; do
+      [ "$kind" = "generated" ] || continue
+      generated_with_nul+=("$name/$fpath	$count")
+    done < <(printf '%s\n' "$scan")
+
+    detail=$(printf '%s\n' "$scan" | python3 -c '
+import sys
+parts = []
+for line in sys.stdin.read().splitlines():
+    fields = line.split("\t")
+    if len(fields) != 3 or fields[0] == "#" or fields[2] != "source":
+        continue
+    parts.append("%s (%s NUL)" % (fields[0], fields[1]))
+print("; ".join(parts))
+')
+
+    if [ -z "$detail" ]; then
+      ok=$((ok + 1))
+      results+=("$name	ok	-	$secs	")
+      echo "OK        $name ($scanned_here source files, ${secs}s)"
+    else
+      failed=$((failed + 1))
+      results+=("$name	fail	nul	$secs	raw NUL in committed source: $detail")
+      echo "FAIL      $name — raw NUL in committed source: $detail"
+    fi
+  done
+fi
+
+# The Go sweep. Skipped wholesale in --node, --elf and --nul modes, which walk
+# their own targets instead of go.mod and have already filled in
+# results/counters above.
 repo_dirs=()
-[ "$MODE" != "node" ] && [ "$MODE" != "elf" ] && repo_dirs=("$REPOS_DIR"/*/)
+[ "$MODE" != "node" ] && [ "$MODE" != "elf" ] && [ "$MODE" != "nul" ] && repo_dirs=("$REPOS_DIR"/*/)
 
 for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   name=$(basename "$path")
@@ -1218,6 +1413,8 @@ printf '%s\n' "${results[@]}" |
   SKIPPED_BY_ONLY="$skipped_by_only" \
   WITHOUT_GO_MOD="$(printf '%s\n' ${without_go_mod+"${without_go_mod[@]}"})" \
   WITHOUT_MAIN_PACKAGE="$(printf '%s\n' ${without_main_package+"${without_main_package[@]}"})" \
+  FILES_SCANNED="$files_scanned" \
+  GENERATED_WITH_NUL="$(printf '%s\n' ${generated_with_nul+"${generated_with_nul[@]}"})" \
   REPORT="$REPORT" \
   python3 -c '
 import json, os, sys
@@ -1318,6 +1515,22 @@ if mode == "node":
     ]
 elif mode == "build":
     report["with_tests"] = os.environ["WITH_TESTS"] == "1"
+elif mode == "nul":
+    # The floor. A walk that reads nothing finds no NUL and reports a clean
+    # fleet, so the count of files actually opened is the one number that tells
+    # a passing verdict from a vacuous one. The status reader gates on it.
+    report["files_scanned"] = int(os.environ["FILES_SCANNED"])
+    # Blobs under node_modules/, dist/ or vendor/ that carry a NUL. Named, not
+    # failed: every one is a compiled copy of a source file upstream, so the
+    # fix is always that file and never this blob. Listing them keeps the
+    # exclusion honest — a reader can see exactly what the mode chose not to
+    # fail on, which is this family s rule for every other exclusion too.
+    report["generated_with_nul"] = [
+        {"path": p, "nul_count": int(c)}
+        for p, _, c in (
+            line.partition("\t") for line in os.environ["GENERATED_WITH_NUL"].splitlines() if line.strip()
+        )
+    ]
 # elf carries no extra keys of its own: it neither runs tests nor a toolchain.
 if mode != "smoke":
     # smoke counts coverage with no_smoke instead: a repo it cannot boot is
@@ -1335,6 +1548,8 @@ elif [ "$MODE" = "node" ]; then
   echo "$ok/$total node packages install, build and pass their declared checks from a clean clone of HEAD; $failed failing, $unguarded unguarded, ${#without_check[@]} declaring no check script ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "elf" ]; then
   echo "$ok/$total repos carry no committed ELF binary at HEAD; $failed with committed binaries, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+elif [ "$MODE" = "nul" ]; then
+  echo "$ok/$total repos carry no raw NUL byte in committed source at HEAD; $failed with a NUL, $unguarded unguarded, $files_scanned source files read, ${#generated_with_nul[@]} generated blob(s) named but not failed ($(( finished_epoch - start_epoch ))s)"
 else
   echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 fi
