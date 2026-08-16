@@ -4,3 +4,9 @@ healthcheck
 # inber agent-session runtime state (session/memory DBs + materialized workspace);
 # never source. Matches the canonical inber repo, which gitignores .inber/.
 .inber/
+
+# Python bytecode. fleet-helper-skeleton-census.py imports its sibling census by
+# path, so running one writes scripts/__pycache__/ into the tree. Untracked build
+# noise, and it blocks `git worktree remove` if left behind.
+__pycache__/
+*.pyc
