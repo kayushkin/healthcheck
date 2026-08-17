@@ -13,8 +13,9 @@
 #
 # It also refuses a report the sweep stamped for another MODE. This file picks
 # its report by path, but the sweep takes its mode from a flag and its path from
-# REPORT=, so the pairing can be wrong — and the four modes name their counts
-# alike enough that a wrong one reads as a clean fleet rather than an error.
+# REPORT=, so the pairing can be wrong — and the five modes (build, smoke, node,
+# elf, nul) name their counts alike enough that a wrong one reads as a clean
+# fleet rather than an error.
 #
 # And it refuses a sweep that JUDGED nothing — ok + failed of zero, counted
 # rather than the repos_total the sweep merely looked at. Such a sweep writes
@@ -50,13 +51,13 @@ except Exception as err:
 if report.get("mode") != "build":
     # Checked FIRST, because until the mode is right every field below is being
     # read off the wrong run. This reader picks its report by PATH, but the sweep
-    # takes its mode from --smoke/--node/--elf and its path from REPORT=, and the
-    # two can be paired wrongly — which is the documented way to run one guard by
-    # hand without clobbering the fleet report. The four modes name their counts
-    # alike (repos_total, ok, failed, unguarded), so nothing downstream notices:
-    # fed the elf report, this file printed "ok: 78/81 repos build from a clean
-    # clone of HEAD" and exited 0, for a sweep that compiled nothing at all. The
-    # sweep stamps mode on every report it writes, including the aborted ones.
+    # takes its mode from --smoke/--node/--elf/--nul and its path from REPORT=,
+    # and the two can be paired wrongly — which is the documented way to run one
+    # guard by hand without clobbering the fleet report. The five modes name their
+    # counts alike (repos_total, ok, failed, unguarded), so nothing downstream
+    # notices: fed the elf report, this file printed "ok: 78/81 repos build from a
+    # clean clone of HEAD" and exited 0, for a sweep that compiled nothing at all.
+    # The sweep stamps mode on every report it writes, including the aborted ones.
     print("FAIL: repo-build report is not a --build report (mode=" + str(report.get("mode")) + ")")
     sys.exit(1)
 
