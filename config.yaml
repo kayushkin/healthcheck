@@ -24,20 +24,24 @@ services:
     auto_restart: true
 
 
-  # kayushkin.com is a SYSTEM unit (/etc/systemd/system/kayushkin.service) — it is
-  # the process that actually binds :8080 and serves the site.
+  # kayushkin.com is a USER unit (~/.config/systemd/user/kayushkin.service). It is
+  # the process that actually binds 127.0.0.1:8080 and serves the site.
   #
-  # Without system_unit, this check ran `systemctl --user is-active kayushkin` and
-  # so watched a SECOND, shadow unit of the same name in ~/.config/systemd/user/.
-  # That shadow can never start while the real one holds :8080, so it died on
-  # `bind: address already in use` and auto_restart dutifully restarted it — for
-  # 811,295 restarts. The check was therefore both permanently red and actively
-  # harmful, and its green state would have meant the real site was DOWN.
+  # Two units of this name exist and both run ~/bin/kayushkin-server, so the name
+  # alone cannot tell you which is real — measure it. Verified 2026-08-17: the user
+  # unit is active with MainPID 2060343, and `ss -tlnp` shows that same pid holding
+  # :8080. The system unit (/etc/systemd/system/kayushkin.service) is failed and
+  # disabled; it was last killed 2026-08-16 with SIGKILL and binds nothing.
+  #
+  # This check previously carried system_unit: true, on a comment asserting the
+  # reverse of the above. That pointed it at the dead unit, which is why it read
+  # down for 1,379 consecutive checks while the site served fine — and it made the
+  # check's own warning come true: a green here would have meant the real site was
+  # DOWN. auto_restart is off. Restarting the loser of a port race is what produced
+  # 811,295 restarts before; whichever unit is watched, that flag re-arms the trap.
   - name: kayushkin
     type: systemd
     unit: kayushkin
-    system_unit: true
-    auto_restart: true
 
   - name: dash-server
     type: systemd
