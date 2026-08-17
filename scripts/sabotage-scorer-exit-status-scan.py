@@ -171,11 +171,13 @@ def entry_call(source):
                 called = statement.value.func
                 if isinstance(called, ast.Name):
                     return called.id, "bare"
-    # No __main__ guard: the module body IS the entry. Ten scorers on this box
-    # are written this way — straight-line scripts ending in
-    # `sys.exit(0 if score == len(CASES) else 1)`. Requiring a guard reported
-    # every one of them UNKNOWN, which is how a real always-exit-0 scorer would
-    # hide next to them.
+    # No __main__ guard: the module body IS the entry. Plenty of scorers on this
+    # box are written that way — straight-line scripts ending in
+    # `sys.exit(0 if score == len(CASES) else 1)`; run this scan with --verbose
+    # and count the `caller=module` lines for the current number (21 distinct
+    # scorer files on 2026-08-17, against 10 when this was first written).
+    # Requiring a guard reported every one of them UNKNOWN, which is how a real
+    # always-exit-0 scorer would hide next to them.
     return MODULE_ENTRY, "module"
 
 

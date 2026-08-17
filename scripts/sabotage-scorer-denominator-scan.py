@@ -227,9 +227,12 @@ def report(rows, verbose=False):
 
     # A scorer with no PACKAGES list cannot have this gap: it does not name a
     # package to run, so there is no denominator to divide wrongly. Saying "read
-    # it by hand" about those buries the ones that DO need reading — measured
-    # 2026-08-09, eight of the eight targetless scorers on this box declare no
-    # PACKAGES at all and none of them was worth the hand read the scan demanded.
+    # it by hand" about those buries the ones that DO need reading. Every
+    # targetless scorer on this box declares no PACKAGES at all, so none of them
+    # was worth the hand read the scan used to demand — first measured 2026-08-09
+    # across eight of them, re-measured 2026-08-17 across 24 blob versions, and
+    # the "every one" has held at both sizes. Re-take it by running this scan: the
+    # exempt count is the line it prints below, and needs_reading is still zero.
     needs_reading = [r for r in rows if not r[7] and not r[4] and r[5]]
     exempt = [r for r in rows if not r[7] and not r[4] and not r[5]]
     for row in needs_reading:

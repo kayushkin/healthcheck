@@ -5,7 +5,8 @@
 #
 # It started as a test of one sweep's repository-discovery rules and grew, one
 # finding at a time, to cover both sweep scripts (repo-build-audit.sh in its
-# five modes, and repo-deploy-audit.sh) and all seven status readers. Renamed
+# five modes, and repo-deploy-audit.sh) and six of the seven status readers.
+# session-taxonomy-status.sh has no case here, so nothing pins it. Renamed
 # 2026-08-08, when the deploy cases landed and the old name named one of the two
 # scripts it tests. Nothing invokes this file but a human, so the rename cost
 # only this comment — see the note about that at the foot of the file.
@@ -576,11 +577,16 @@ check "coverage: the reader prints the excluded directories, not just the judged
 # anywhere in the report. The reader turned that into "all 76 deployed artifacts
 # match their committed HEAD", which is a coverage claim it had no basis for.
 #
-# The category claim the hatch makes is TRUE — all 18 really are shell scripts,
-# symlinks to .py, or third-party python. This is NOT a wrong comment being
-# corrected, and the distinction matters for whoever reads this next: the defect
-# is that a Go artifact which ever stopped emitting buildinfo would join them and
-# leave the gate with no evidence it had gone. That is not hypothetical here.
+# The category claim the hatch makes is TRUE: the entries really are shell
+# scripts, symlinks to .py and third-party python, not Go. No count is written
+# here — the block below explains at length why an absolute count of this
+# population is flaky by construction, and that applies to prose as much as to an
+# assertion. Read the size off `skipped_not_go` in the report instead.
+#
+# This is NOT a wrong comment being corrected, and the distinction matters for
+# whoever reads this next: the defect is that a Go artifact which ever stopped
+# emitting buildinfo would join them and leave the gate with no evidence it had
+# gone. That is not hypothetical here.
 # ~/bin/kayushkin-server, the binary serving the live site, sat in exactly this
 # blind spot for the whole life of the script while every guard on the box stayed
 # green; `no-module` is the branch that had to be added for it.

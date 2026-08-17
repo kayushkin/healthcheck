@@ -14,10 +14,21 @@
 # as if it were what the fleet ships.
 #
 # It is not. `grep -rn .` reads whatever branch the repo has checked out.
-# Measured 2026-08-09 over 76 repos with a main or master: TEN are parked off
-# trunk, and FIVE of those are parked on `fix/truncation-never-splits-a-rune`,
-# which is that same sweep's own fix branch. In those five the scan reads the
-# repair, and the defect still shipping on trunk is invisible to it. Concretely:
+#
+# Measured 2026-08-17 over the 79 repos with a main or master: THIRTY-FIVE are
+# parked off trunk, and FIVE of those are parked on
+# `fix/truncation-never-splits-a-rune`, which is that same sweep's own fix
+# branch. Read those as a reading taken on a date, not as a standing fact — the
+# fleet grows and branches come and go. Re-take them with this file's own
+# `--json` mode, which reports repos_examined and the whole parked set:
+#
+#     bash scripts/fleet-scan-ref-preamble.sh --json
+#
+# First measured 2026-08-09, when the same command answered 76 repos and TEN
+# parked; the FIVE on the fix branch has not moved between the two readings.
+#
+# In those five the scan reads the repair, and the defect still shipping on
+# trunk is invisible to it. Concretely:
 #
 #     main:internal/format/format.go:103     content = v[:50] + "..."
 #     fix/truncation…:internal/format/…      content = textutil.TruncateAtRuneBoundary(v, 50) + "..."
@@ -37,7 +48,7 @@
 #
 # WHY THIS IS NOT A RED/GREEN NIGHTLY GUARD
 #
-# Deliberately. A parked branch is not a fault: those ten branches are unmerged
+# Deliberately. A parked branch is not a fault: every parked branch is unmerged
 # work, and the decision about merging them is held open on purpose in noteboard
 # card bab768a3. A nightly check that went red because the user has work in
 # progress would cry wolf every night about a state they chose — and a guard

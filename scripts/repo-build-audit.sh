@@ -596,10 +596,19 @@ check_port_collisions() {
 # the denominator the coverage accounting below closes against; `repos_total` is
 # what SURVIVED the filters, which is a different and much smaller number.
 #
-# Measured 2026-08-08: 81 directories, of which --build judges 71 and --smoke 61.
-# Before this line the other 10 and 20 left no trace anywhere in the report, so
-# `ok: 71/71 repos build from a clean clone of HEAD` was the whole story a reader
-# ever got — see the exclusion lists at the report writer for why that matters.
+# The gap is wide, and most of it is not projects at all: ~/repos now holds
+# throwaway `-wt-` git worktrees next to the real repos, and those leave first.
+#
+# Measured 2026-08-17: 109 directories, 27 of them linked worktrees, leaving 82
+# real directories, of which --build judges 72 and --smoke 62. Read that as a
+# reading taken on a date, not a standing fact — re-take it from this sweep's own
+# report, which publishes directories_scanned, worktrees and repos_total.
+# (Measured 2026-08-08 it was 81 directories, 71 and 61.)
+#
+# The point survives whatever the numbers do: before this line the excluded
+# directories left no trace anywhere in the report, so `ok: 71/71 repos build
+# from a clean clone of HEAD` was the whole story a reader ever got — see the
+# exclusion lists at the report writer for why that matters.
 directories_scanned=0
 for path in "$REPOS_DIR"/*/; do
   directories_scanned=$((directories_scanned + 1))
@@ -810,9 +819,13 @@ without_check=()
 # accounting exists. Every OTHER way a directory leaves this sweep is already
 # announced — a linked worktree is listed in `worktrees`, a directory with no
 # committed HEAD is counted in `unguarded`, a repo with no smoke script is
-# counted in `no_smoke` and named in `without_smoke`. These two were not, and
-# they are the two biggest: 10 of 81 directories carry no go.mod, and a further
-# 10 of the remaining 71 ship no `package main` at HEAD.
+# counted in `no_smoke` and named in `without_smoke`. These two were not.
+#
+# They are the two largest exclusions that nothing else announces — not the two
+# largest outright, which they once were: linked worktrees now leave this sweep
+# in greater numbers than either. No count is written here on purpose. Both sets
+# are published in the report as without_go_mod and without_main_package, so a
+# reader counts them from the run in front of them rather than from this line.
 #
 # That mattered because the shrinkage is invisible in the direction that looks
 # healthy. A repo that loses its go.mod, or whose only `package main` moves
@@ -1133,9 +1146,10 @@ SOURCE_EXTENSIONS = {
 # Generated trees. A bundle here can carry a NUL, but only ever because a
 # source file upstream of it does, so failing on it would report the same
 # defect twice and stay red until somebody re-ran a build. Counted and named
-# separately instead. Measured 2026-08-15: five such blobs across dash, llmux
-# and bridge-ui/dist, every one of them a compiled copy of the same two source
-# files this mode was written for.
+# separately instead — named is the part that matters, because the count is of
+# hashed build artifacts and changes with every deploy that commits a rebuild.
+# Every hit seen so far is a bundle of a source file this mode fails on in its
+# own right, which is why naming them and failing only on the source is enough.
 GENERATED_DIRECTORIES = {"node_modules", "dist", "vendor"}
 
 repo = os.environ["REPO"]
@@ -1259,10 +1273,12 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
     # working tree, and answered without the go toolchain so that the coverage
     # count costs nothing.
     #
-    # Named, not dropped. This is the single largest exclusion in any mode of
-    # this sweep — 10 of the 71 Go repos — and until 2026-08-08 the only record
-    # that it had happened was the gap between --build's repos_total and
-    # --smoke's, which nothing compares. A repo whose `package main` moves into
+    # Named, not dropped. This is the largest exclusion the smoke mode itself
+    # makes — linked worktrees leave earlier and in greater numbers, so it is not
+    # the largest in the sweep — and its size is published as without_main_package
+    # rather than asserted here. Until 2026-08-08 the only record that it had
+    # happened at all was the gap between --build's repos_total and --smoke's,
+    # which nothing compares. A repo whose `package main` moves into
     # a directory that is not committed leaves the smoke gate here, and the gate
     # reports one fewer repo passing out of one fewer repo total.
     if ! git -C "$path" grep -qE '^package main$' HEAD -- '*.go' 2>/dev/null; then
@@ -1500,7 +1516,7 @@ if mode == "node":
     # The unit here is a PACKAGE, not a repo: several repos keep their
     # frontend in a subdirectory (argraphments/frontend, llm-bridge/ts), and
     # a repo can hold more than one. Naming the count honestly keeps anyone
-    # from reading it against the 68 repos of the Go pass.
+    # from reading a package count against the repo count of the Go pass.
     # (No apostrophes in this block: it is embedded in a single-quoted shell
     # string, and a nested quote silently ends it.)
     report["node_version"] = os.environ["NODE_VERSION"]

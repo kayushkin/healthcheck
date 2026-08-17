@@ -18,14 +18,17 @@
 #
 # It does NOT fail on packages reported `unguarded`. Those are packages the sweep
 # cannot judge at all (no committed lockfile; a lockfile for a package manager
-# this host does not have), and there are two of them today. The count is printed
-# so the gap stays visible and shrinks, but a red-from-day-one check is a check
-# people learn to ignore — and an ignored guard is worse than no guard.
+# this host does not have). Measured 2026-08-17 there are two, and that is a
+# reading rather than a fixed size — this reader prints the live count on every
+# run, and `unguarded_packages` in node-report.json names them. The count is
+# printed so the gap stays visible and shrinks, but a red-from-day-one check is
+# a check people learn to ignore — and an ignored guard is worse than no guard.
 #
 # It also refuses a report the sweep stamped for another MODE. This file picks
 # its report by path, but the sweep takes its mode from a flag and its path from
-# REPORT=, so the pairing can be wrong — and the four modes name their counts
-# alike enough that a wrong one reads as a clean fleet rather than an error.
+# REPORT=, so the pairing can be wrong — and the five modes (build, smoke, node,
+# elf, nul) name their counts alike enough that a wrong one reads as a clean
+# fleet rather than an error.
 #
 # And it refuses a sweep that JUDGED nothing — ok + failed of zero, counted
 # rather than the repos_total the sweep merely looked at. Such a sweep writes
@@ -66,14 +69,15 @@ except Exception as err:
 if report.get("mode") != "node":
     # Checked FIRST, because until the mode is right every field below is being
     # read off the wrong run. This reader picks its report by PATH, but the sweep
-    # takes its mode from --smoke/--node/--elf and its path from REPORT=, and the
-    # two can be paired wrongly — which is the documented way to run one guard by
-    # hand without clobbering the fleet report. The four modes name their counts
-    # alike (repos_total, ok, failed, unguarded), so nothing downstream notices:
-    # fed the Go build report, this file printed "ok: 71/71 node packages install,
-    # build and pass their declared checks" and exited 0. There are 12 node
-    # packages, and that run never invoked npm. The sweep stamps mode on every
-    # report it writes, including the aborted ones.
+    # takes its mode from --smoke/--node/--elf/--nul and its path from REPORT=,
+    # and the two can be paired wrongly — which is the documented way to run one
+    # guard by hand without clobbering the fleet report. The five modes name their
+    # counts alike (repos_total, ok, failed, unguarded), so nothing downstream
+    # notices: fed the Go build report, this file printed "ok: 71/71 node packages
+    # install, build and pass their declared checks" and exited 0. Measured
+    # 2026-08-17 there are 12 node packages, nothing like 71, and that run never
+    # invoked npm at all. The sweep stamps mode on every report it writes,
+    # including the aborted ones.
     print("FAIL: repo-node report is not a --node report (mode=" + str(report.get("mode")) + ")")
     sys.exit(1)
 
@@ -119,13 +123,23 @@ if age_hours > max_age:
     sys.exit(1)
 
 if ok + failed == 0:
-    # Judged, not merely SEEN. repos_total counts every repo the sweep looked at,
-    # including the unguarded ones it could not judge at all, so it is the wrong
-    # quantity to gate on: a sweep in which every repo came back unguarded prints
-    # a repos_total the reader is happy with and an ok count of zero. This check
-    # was written against repos_total first and the selftest caught it — an --elf
-    # sweep of an empty root reports repos_total=1 having scanned nothing, because
-    # the unmatched glob is swept as a repo literally named *.
+    # Judged, not merely SEEN. repos_total is the wrong quantity to gate on for
+    # two separate reasons, and only the first was written down here originally:
+    # it includes the unguarded repos the sweep could not judge at all, so a sweep
+    # in which every repo came back unguarded prints a repos_total the reader is
+    # happy with and an ok count of zero. This check was written against
+    # repos_total first and the selftest caught it — an --elf sweep of an empty
+    # root reports repos_total=1 having scanned nothing, because the unmatched
+    # glob is swept as a repo literally named *.
+    #
+    # The second reason, measured 2026-08-08 and recorded in repo-elf-status.sh
+    # the same day: repos_total does NOT count every repo the sweep looked at,
+    # which is what this comment used to claim. It counts what survived the
+    # filters — a --node sweep counts packages that reached the install step, and
+    # the non-node modes drop the directories with no go.mod and, in smoke, the Go
+    # repos with no `package main`. The accounting check below is what closes that
+    # gap; this one cannot, because it gates on a number already net of the
+    # exclusions.
     #
     # A sweep that judged nothing is not a clean fleet. It writes no `aborted` and
     # no `only`, so every check above passes in turn and this file used to print

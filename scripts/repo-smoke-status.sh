@@ -193,8 +193,11 @@ if failed:
 
 # Both halves of the coverage claim, for the reason given in the accounting
 # block: N/N stays green as N falls, so N alone is not a coverage figure.
-# --smoke has the largest exclusion of any mode — 20 of 81 directories — and
-# none of it was visible here before 2026-08-08.
+# --smoke has the largest exclusion of any mode, and none of it was visible here
+# before 2026-08-08. Measured 2026-08-17 that is 20 of the 82 real directories
+# under the repos root — real meaning not a `-wt-` git worktree, of which there
+# are now 27 more, dropped before this exclusion runs. Re-take both numbers from
+# the report: directories_scanned, worktrees, without_go_mod, without_main_package.
 print(
     f"ok: {ok}/{total} binaries boot and answer from a clean clone of HEAD "
     f"({total} of {scanned} directories under the repos root ship a Go main "

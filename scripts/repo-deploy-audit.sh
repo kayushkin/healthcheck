@@ -52,11 +52,17 @@
 # writes no `mod` line and no vcs stamps. This script read "no mod line" as
 # "not a Go binary" and skipped it in silence.
 #
-# Measured 2026-08-08: 4 such binaries were deployed on this box and 1 was
-# RUNNING — ~/bin/kayushkin-server, the process answering the live site. It
-# appeared in no report, in no count, and in no failure, and it had never once
-# been checked for drift. Every other guard was green, so nothing anywhere
-# suggested the live site's binary was unaudited.
+# Measured 2026-08-08, and quoted here as the state that provoked the fix rather
+# than as today's: 4 such binaries were deployed on this box and 1 was RUNNING —
+# ~/bin/kayushkin-server, the process answering the live site. It appeared in no
+# report, in no count, and in no failure, and it had never once been checked for
+# drift. Every other guard was green, so nothing anywhere suggested the live
+# site's binary was unaudited.
+#
+# Re-measured 2026-08-17, after the repair described below: ~/bin/kayushkin-server
+# now stamps `mod github.com/kayushkin/kayushkin.com`, and the no-module set is
+# down to three, none of them running. Re-take that from the report itself, or by
+# hand with `go version -m <path>` over ~/bin and /usr/local/bin.
 #
 # Two defects in series produced it, both now fixed in kayushkin.com: deploy.sh
 # built a file list (so no module was stamped), and go.mod said `module gohome`,
@@ -84,23 +90,27 @@
 # "Same command" means the main package path (`go version -m`'s `path` line),
 # not the module and not the filename. Both of the other two are wrong here:
 #
-#   - the module holds many commands. scheduler ships ten, so keying ghosts on
-#     the module called all ten a ghost of each other, every night.
-#   - the filename differs across copies of one command. The three artifacts
-#     built from cmd/llm-bridge-server are two called `llm-bridge` and one
-#     called `llm-bridge-server`.
+#   - the module holds many commands. scheduler ships a whole cmd/ tree of them,
+#     so keying ghosts on the module called every one of them a ghost of each
+#     other, every night.
+#   - the filename differs across copies of one command. The artifacts built from
+#     cmd/llm-bridge-server are variously called `llm-bridge`,
+#     `llm-bridge-server` and `llm-bridge.backup-<stamp>`.
 #
-# The main package path separates the ten and unites the three. We report the
-# idle copies by path, since the path is what you delete.
+# The main package path separates the commands of one module and unites the
+# copies of one command. We report the idle copies by path, since the path is
+# what you delete.
 #
 # What it does NOT compare, and how a reader can tell
 # ----------------------------------------------------
 # `artifacts_total` is the number of executables this sweep could IDENTIFY as Go
 # binaries — not the number it looked at. That difference used to be invisible:
-# measured 2026-08-08, 76 of 94 candidates were compared and the other 18 left
+# as of 2026-08-08, 76 of 94 candidates were compared and the other 18 left
 # through the "not a Go binary" hatch without appearing in any count, list or
 # failure. `ok: all 76 deployed artifacts match their committed HEAD` was the
 # whole story a reader ever got, and it reads as a statement about the box.
+# Those two numbers are the state at that date, not a fixed size: re-measured
+# 2026-08-17 the same sweep sees 100 candidates, identifies 78 and skips 22.
 #
 # Both halves are reported now — `executables_scanned` and `skipped_not_go` —
 # and repo-deploy-status.sh refuses a report in which
@@ -322,13 +332,19 @@ executables_scanned=0
 # different artifacts, and the path is the thing you go and look at — the same
 # reason `ghost_artifacts` records paths.
 #
-# The category claim this hatch makes is TRUE — measured 2026-08-08, all 17 are
-# shell scripts, symlinks to .py, or third-party python. This is not a wrong
-# comment being corrected. It is that a Go artifact which ever stopped emitting
-# buildinfo would join them and vanish from the gate leaving no evidence, and
-# that has already happened on this box in a different form: `no-module` is a
-# branch the tenth pass had to add for ~/bin/kayushkin-server, the binary
-# serving the live site, which this sweep could not see for its whole life.
+# The category claim this hatch makes holds whenever it is checked: the entries
+# are shell scripts, symlinks to .py and third-party python, plus — from the
+# running-process half of the candidate list — third-party C ELF binaries and an
+# interpreter. None of them Go. No count is written here on purpose; the set is
+# published as `skipped_not_go`, so a reader counts it from the run in front of
+# them.
+#
+# This is not a wrong comment being corrected. It is that a Go artifact which
+# ever stopped emitting buildinfo would join them and vanish from the gate
+# leaving no evidence, and that has already happened on this box in a different
+# form: `no-module` is a branch the tenth pass had to add for
+# ~/bin/kayushkin-server, the binary serving the live site, which this sweep
+# could not see for its whole life.
 skipped_not_go=()
 
 while IFS= read -r bin; do
