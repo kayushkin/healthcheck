@@ -108,6 +108,11 @@ services:
     unit: kanban-store
     auto_restart: true
 
+  - name: quote-store
+    type: systemd
+    unit: quote-store
+    auto_restart: true
+
   - name: producer
     type: systemd
     unit: producer
