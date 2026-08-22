@@ -970,6 +970,84 @@ PY
   check "deploy branches: an artifact with a real main package is not named there" \
         "no" "$(dbr_in ghost_identity_from_filename dbrok)"
 
+  # --- the reader half: does the ok line claim a comparison that never happened?
+  #
+  # Four of the seven statuses above never reach `git rev-list --count rev..HEAD`
+  # — unmapped, no-vcs, orphan-rev and no-module each continue before it, because
+  # the sweep could not find the repo, the revision or the module to compare
+  # against. All four still land in `artifacts`, and so in artifacts_total, and
+  # the reader printed "all N deployed artifacts match their committed HEAD" over
+  # the lot. Measured on a report derived from the live 2026-08-22 sweep: 28
+  # artifacts, 6 of them never compared, and that sentence printed anyway.
+  #
+  # This is the same defect the coverage section above fixed one layer out. There
+  # the uncounted artifacts were OUTSIDE artifacts_total (the not-a-Go-binary
+  # hatch); here they are INSIDE it. That repair made the DENOMINATOR honest and
+  # left the NUMERATOR still overclaiming.
+  #
+  # stale_running and stale_wip are cleared for the same reason dcov-good.json
+  # clears them: the fixture bin dirs are swept alongside every running process
+  # on this box, so the reader would exit 1 on its own merits and every ok-path
+  # check below would pass with the repair deleted.
+  python3 - "$ROOT/dbr.json" "$ROOT/dbr-good.json" <<'DBRGOOD'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["stale_running"] = []
+d["stale_wip"] = []
+json.dump(d, open(sys.argv[2], "w"))
+DBRGOOD
+  dbr_good_out=$(REPORT="$ROOT/dbr-good.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+  dbr_good_rc=$?
+
+  # ⚠️ NO ABSOLUTE COUNT IS ASSERTED, for the reason stated at the head of this
+  # section: the sweep also considers the exe of every running process, so a
+  # binary outside the fixture can add an uncompared row between two runs
+  # seconds apart. What is deterministic is that all four uncompared statuses are
+  # present in this report and that each is NAMED.
+  check "deploy ok line: it stops saying ALL artifacts match when some were never compared" \
+        "yes" \
+        "$(case "$dbr_good_out" in "ok: all "*) echo "no: $dbr_good_out" ;; ok:*) echo yes ;; *) echo "no: $dbr_good_out" ;; esac)"
+  check "deploy ok line: it says outright that some artifacts were never compared" \
+        "yes" \
+        "$(case "$dbr_good_out" in *"were never compared to one"*) echo yes ;; *) echo "no: $dbr_good_out" ;; esac)"
+  # Each status by name, so a breakdown that collapses the four into one number —
+  # or silently drops one of them — cannot pass. no-vcs is the status shared with
+  # a RUNNING fixture artifact, which is why it has to appear here as well as in
+  # stale_running above.
+  for dbr_uncompared in unmapped no-vcs orphan-rev no-module; do
+    check "deploy ok line: the breakdown names $dbr_uncompared" \
+          "yes" \
+          "$(case "$dbr_good_out" in *" $dbr_uncompared"*) echo yes ;; *) echo "no: $dbr_good_out" ;; esac)"
+  done
+
+  # --- the two over-correction arms. The repair states what was checked; it must
+  # not start GATING on it. Whether an unmapped artifact should go red, and
+  # whether a reader should refuse a report holding too many of them, are options
+  # A and B of card df353a8e and are not answered here. Without these two arms a
+  # repair that failed the check outright would satisfy every assertion above and
+  # read as diligence.
+  check "deploy ok line: an uncompared artifact is still not a failure" \
+        "0" "$dbr_good_rc"
+  check "deploy ok line: a report holding uncompared artifacts is not refused" \
+        "yes" \
+        "$(case "$dbr_good_out" in FAIL:*) echo "no: $dbr_good_out" ;; *) echo yes ;; esac)"
+
+  # The converse, and it is load-bearing: without it every check above is
+  # satisfied by a reader that prints the uncompared clause unconditionally,
+  # which would be a second false claim in the other direction.
+  python3 - "$ROOT/dbr-good.json" "$ROOT/dbr-allcompared.json" <<'DBRALL'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["artifacts"] = [a for a in d["artifacts"] if a["status"] in ("ok", "behind", "stale")]
+d["artifacts_total"] = len(d["artifacts"])
+d["executables_scanned"] = d["artifacts_total"] + len(d["skipped_not_go"])
+json.dump(d, open(sys.argv[2], "w"))
+DBRALL
+  dbr_all_out=$(REPORT="$ROOT/dbr-allcompared.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+  check "deploy ok line: a report where everything WAS compared still says all of them match" \
+        "yes" \
+        "$(case "$dbr_all_out" in "ok: all "*"deployed artifacts match their committed HEAD"*) echo yes ;; *) echo "no: $dbr_all_out" ;; esac)"
+
   kill "${DBR_PIDS[@]}" 2>/dev/null
   wait "${DBR_PIDS[@]}" 2>/dev/null
   DBR_PIDS=()

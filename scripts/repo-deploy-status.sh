@@ -195,13 +195,57 @@ if problems:
 
 ghost_note = f", {len(ghosts)} ghost artifact(s)" if ghosts else ""
 max_behind = thresholds["max_behind"]
+
+# How many of the artifacts_total were actually compared to a committed HEAD.
+#
+# Only three of the sweeps seven statuses reach the comparison: ok, behind and
+# stale are the branch that runs `git rev-list --count rev..HEAD`. The other
+# four — unmapped, no-vcs, orphan-rev, no-module — each `continue` BEFORE that
+# line, because in every one of them the sweep could not find the repo, the
+# revision or the module to compare against. They still land in `artifacts`, and
+# therefore in artifacts_total, so the ok line was reporting them as matching a
+# HEAD that was never looked up. Measured on a report derived from this boxs own
+# 2026-08-22 sweep: 28 artifacts, 6 of them never compared, and the line said
+# "all 28 deployed artifacts match their committed HEAD".
+#
+# The set is written as the three that WERE compared, not the four that were
+# not, and the polarity is the whole point. A status added to the sweep later is
+# then counted as uncompared until somebody says otherwise, so it cannot join
+# the "all N match" claim by default. Naming the four instead would let the next
+# status quietly inherit a comparison it never had — the same equivalence this
+# file refuses on staleness and on coverage.
+#
+# This states what was checked; it does not gate. An uncompared artifact is not
+# made a failure here and no report is refused for having one: whether unmapped
+# should go red, and whether a reader should refuse a report with too many of
+# them, are open questions on card df353a8e and are deliberately left alone.
+COMPARED_TO_A_HEAD = ("ok", "behind", "stale")
+artifacts = report["artifacts"]
+uncompared = [a for a in artifacts if a.get("status") not in COMPARED_TO_A_HEAD]
+
+if uncompared:
+    by_status = {}
+    for a in uncompared:
+        key = str(a.get("status"))
+        by_status[key] = by_status.get(key, 0) + 1
+    breakdown = ", ".join(f"{n} {s}" for s, n in sorted(by_status.items()))
+    verdict = (
+        f"ok: {total - len(uncompared)} of {total} deployed artifacts match their "
+        f"committed HEAD within {max_behind} commits; {len(uncompared)} were never "
+        f"compared to one ({breakdown})"
+    )
+else:
+    verdict = (
+        f"ok: all {total} deployed artifacts match their committed HEAD within "
+        f"{max_behind} commits"
+    )
+
 # The coverage figure is printed, not merely reconciled. The identity above
 # proves the numbers add up; it cannot tell that 76 was 77 last night. Putting
 # both halves on the line a human actually reads is what makes an artifact
 # silently leaving the sweep look different from a clean fleet.
 print(
-    f"ok: all {total} deployed artifacts match their committed HEAD within "
-    f"{max_behind} commits{ghost_note} "
+    f"{verdict}{ghost_note} "
     f"({total} of {scanned} executables scanned are Go binaries, "
     f"checked {age_hours:.1f}h ago)"
 )
