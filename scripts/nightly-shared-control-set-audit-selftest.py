@@ -57,6 +57,8 @@ _SPEC.loader.exec_module(audit_module)
 # non-zero when a sabotage is caught.
 CONFORMING = '''\
 import sys
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -72,6 +74,8 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 # an audit that reads only the exit code calls every arm here a hole.
 CAUGHT_BY_LINE = '''\
 import sys
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -87,6 +91,8 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 # no caught-by line. This is the state the audit exists to find.
 SABOTAGE_UNCAUGHT = '''\
 import sys
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -100,6 +106,8 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 # The half-honest hole: it says it caught something and names no rows.
 SABOTAGE_CAUGHT_NOTHING = '''\
 import sys
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -128,6 +136,13 @@ print("9/9 sabotages caught"); sys.exit(0)
 # Honours --sabotage and ignores --list-sabotages, so its arms exist and cannot be
 # enumerated. This is `~/.nightly-348-buildtags/selftest.py` as it stood before
 # 2026-08-22, and it is why the audit's first run had a finding.
+#
+# ⚠️ This one must keep FALLING THROUGH to its ordinary report for a flag it does not
+# know — that is the whole shape it models, and `trust-the-arm-list` is the arm that
+# reads that report as an arm list. Adding a refusal here (as card `3165bed1` did to
+# the four fixtures above) makes `--list-sabotages` exit non-zero, `list_sabotages`
+# return None on the status alone, and `trust-the-arm-list` catch nothing. Measured:
+# it went straight to CONTROL BROKEN.
 NO_LIST_FLAG = '''\
 import sys
 ARMS = {"breaks-the-predicate": 1}
@@ -135,6 +150,22 @@ if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
     if sys.argv[2] not in ARMS:
         print("unknown sabotage %r" % sys.argv[2]); sys.exit(2)
     print("  caught by 1 row(s): ['a']"); sys.exit(0)
+print("CLEAN: 2/2 rows as expected"); sys.exit(0)
+'''
+
+# Refuses in prose and exits 0 anyway. Every caller that reads the status still sees a
+# green run, so the complaint buys nothing — the refusal has to be in the exit code.
+COMPLAINS_ABOUT_THE_FLAG_AND_EXITS_ZERO = '''\
+import sys
+ARMS = ["breaks-the-predicate"]
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(0)
+if "--list-sabotages" in sys.argv:
+    print("\\n".join(ARMS)); sys.exit(0)
+if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
+    if sys.argv[2] not in ARMS:
+        print("unknown sabotage %r" % sys.argv[2]); sys.exit(2)
+    print("SABOTAGE %s: 1/2 rows as expected" % sys.argv[2]); sys.exit(1)
 print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 '''
 
@@ -239,6 +270,40 @@ def case_flag_ignoring_set_yields_no_invented_arms(work):
     return (labels == ["clean"] and record["sabotages_run"] is False
             and "does not honour --sabotage" in record["sabotages_unrun_because"]), \
         f"labels={labels} because={record.get('sabotages_unrun_because')}"
+
+
+def case_flag_ignoring_set_is_a_finding(work):
+    """Ignoring an unrecognised flag is reported, not merely worked around.
+
+    The audit already copes with the old dialect — it probes capability instead of
+    assuming it — and coping quietly is how the dialect survived. A control set that
+    cannot be shown to have read a flag is a finding.
+    """
+    root = build_fixture(os.path.join(work, "ignoresfinding"),
+                         modules=["alpha"], control_sets=[("alpha", IGNORES_FLAGS)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    return bool(findings_matching(result, "ignores an unrecognised flag")), \
+        f"findings={result['findings']}"
+
+
+def case_a_complaint_without_a_status_is_still_a_finding(work):
+    """Printing "unrecognised argument" and exiting 0 leaves every caller green."""
+    root = build_fixture(
+        os.path.join(work, "complains"), modules=["alpha"],
+        control_sets=[("alpha", COMPLAINS_ABOUT_THE_FLAG_AND_EXITS_ZERO)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    return bool(findings_matching(result, "ignores an unrecognised flag")), \
+        f"findings={result['findings']}"
+
+
+def case_a_refusing_set_records_that_it_refused(work):
+    """The conforming answer is recorded per control set, not only inferred from silence."""
+    root = build_fixture(os.path.join(work, "refuses"),
+                         modules=["alpha"], control_sets=[("alpha", CONFORMING)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    record = result["control_sets"][0]
+    return record.get("refuses_unrecognised_flag") is True, \
+        f"record={record.get('refuses_unrecognised_flag')} findings={result['findings']}"
 
 
 def case_arms_that_cannot_be_listed_are_a_finding(work):
@@ -434,6 +499,9 @@ CASES = [
     ("a red clean arm suppresses the sabotages", case_red_clean_arm_does_not_run_sabotages),
     ("a flag-ignoring set yields no invented arms", case_flag_ignoring_set_yields_no_invented_arms),
     ("arms that cannot be listed are a finding", case_arms_that_cannot_be_listed_are_a_finding),
+    ("a flag-ignoring set is a finding", case_flag_ignoring_set_is_a_finding),
+    ("a complaint without a status is a finding", case_a_complaint_without_a_status_is_still_a_finding),
+    ("a refusing set records that it refused", case_a_refusing_set_records_that_it_refused),
     ("a registered control set that is gone is a finding", case_missing_registered_control_set_is_a_finding),
     ("a registry naming an absent module is a finding", case_registry_naming_an_absent_module_is_a_finding),
     ("a new uncovered module is a finding", case_new_uncovered_module_is_a_finding),
@@ -499,6 +567,16 @@ def _sabotage_trust_the_arm_list():
     audit_module.list_sabotages = unguarded
 
 
+def _sabotage_assume_the_flag_was_read():
+    """Assume every control set read the flag it was sent.
+
+    This is the predicate `refuses_an_unrecognised_flag` exists to be. Without it the
+    audit copes with a flag-ignoring control set in silence, which is how three of the
+    four kept the dialect for as long as they did.
+    """
+    audit_module.refuses_an_unrecognised_flag = lambda path: True
+
+
 def _sabotage_a_missing_control_set_is_a_skip():
     """The registry points at nothing and the audit shrugs."""
     audit_module.control_set_exists = lambda path: True
@@ -545,6 +623,7 @@ SABOTAGES = {
         _sabotage_a_missing_toolchain_is_someone_elses_problem,
     "read-only-the-exit-code": _sabotage_read_only_the_exit_code,
     "assume-the-sabotage-flag": _sabotage_assume_the_sabotage_flag,
+    "assume-the-flag-was-read": _sabotage_assume_the_flag_was_read,
     "trust-the-arm-list": _sabotage_trust_the_arm_list,
     "a-missing-control-set-is-a-skip": _sabotage_a_missing_control_set_is_a_skip,
     "an-unreadable-verdict-passes": _sabotage_an_unreadable_verdict_passes,

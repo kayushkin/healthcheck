@@ -37,13 +37,17 @@ A cheap check nobody runs is not cheaper than an expensive one; it is worth noth
 ## ⛔ The exit code does not carry the verdict, and it differs per control set
 
 Measured 2026-08-22 over the four control sets on this box, and it is the reason this
-script is longer than a loop over `python3 <selftest>`:
+script is longer than a loop over `python3 <selftest>`. Each column is an exit status,
+taken with the status captured into a variable on its own line — reading `$?` inside a
+string that also holds a `$(...)` substitution gives you the substitution's status, and
+that mis-measured this very table once:
 
-    control set                          clean  sabotage-caught  nonsense arm
-    ~/.nightly-348-buildtags/selftest.py   0          0              1
-    reach_control_selftest.py              0          0              2
-    collect_reach_claims_selftest.py       0          1              1
-    unbuilt_test_scope_selftest.py         0     (arms are internal) 0
+    control set                            unrecognised  unknown   --list-     caught
+                                               flag        arm    sabotages   sabotage
+    ~/.nightly-348-buildtags/selftest.py    0 -> 2          2         0           0
+    reach_control_selftest.py               0 -> 2          2         0           0
+    collect_reach_claims_selftest.py          2            1         0           1
+    unbuilt_test_scope_selftest.py          0 -> 2        0 -> 2    0 -> 0        0
 
 **Two of the four exit 0 when a sabotage is caught**, so a runner that reads only the
 exit code cannot tell a caught sabotage from a hole in the case list — it would call
@@ -52,17 +56,29 @@ both green. `reach_control_selftest.py` carries a sabotage arm named
 This script therefore reads a sabotage verdict as **caught** when the arm exits
 non-zero *or* prints a `caught by N row(s)/case(s)` line with N of one or more, records
 per arm which of the two said so, and calls the verdict UNREADABLE — a finding, never a
-pass — when neither does.
+pass — when neither does. That fork is still open: it is the contested half of card
+`3165bed1` and no control set's verdict convention was changed.
 
-**Two of the four also ignore an unknown flag** and print their ordinary green report,
-so `--list-sabotages` against them yields their whole report, and an unguarded reader
-parses its prose into sabotage names. Before trusting any name list, this script probes
-with `--sabotage __no_such_arm__`: a control set that honours the protocol refuses it,
-and one that comes back green does not implement `--sabotage` at all.
+**The `->` columns are what card `3165bed1` closed on 2026-08-22.** THREE of the four
+ignored an unrecognised flag — not two, as this docstring said before it was re-measured
+— and printed their ordinary green report, so `--list-sabotages` against them yielded
+that report and an unguarded reader parsed its prose into sabotage names. All four now
+refuse an unrecognised flag with exit 2 and answer `--list-sabotages`, and
+`refuses_an_unrecognised_flag` below makes a set that stops doing so a **finding**
+rather than a silence. `unbuilt_test_scope_selftest.py` implemented none of the three
+probes; giving it `--sabotage <name>` took this audit from 25 arms to 34, because its
+nine arms could not be reached from outside before.
 
-Making the four agree on one protocol would be better than reading four dialects. That
-is a change to other passes' instruments and is filed as its own card,
-`3165bed1-e789-4e77-b977-e34b395a3af9`, not done here.
+Capability is still probed, never assumed, and this script still reads the old dialect:
+a control set arriving tomorrow may speak it, and the reading has to survive that. Before
+trusting any name list it probes with `--sabotage __no_such_arm__`, and a name list is
+rejected when it comes back equal to the clean report.
+
+⚠️ **A listable arm name cannot contain whitespace.** Every reader of a
+`--list-sabotages` list takes the first whitespace-delimited token as the name, so an arm
+called `ignored/compiled inverted` is asked for as `ignored/compiled`, refused, and the
+refusal's non-zero exit reads as a caught sabotage. `unbuilt_test_scope_selftest.py`'s
+nine arms were renamed to hyphenated slugs for exactly this reason.
 
 ## Reporting
 
@@ -287,6 +303,11 @@ def read_sabotage_verdict(arm):
 
 NONSENSE_SABOTAGE = "__no_such_sabotage_arm__"
 
+# A flag no control set can implement. Distinct from NONSENSE_SABOTAGE above: that one
+# asks whether `--sabotage` is honoured, this one asks whether an argument the control
+# set does not recognise is refused at all.
+NONSENSE_FLAG = "--__no_such_flag_on_any_control_set__"
+
 # `main` runs this script's own control set before auditing anything, and that control
 # set drives this script. The env var breaks the recursion the same way
 # `find_controls.py --run` breaks its own.
@@ -361,6 +382,29 @@ def honours_sabotage_flag(path):
     # Either channel is enough, because the two conforming dialects use different ones:
     # a non-zero exit, or a line saying the name is not one of its arms.
     return arm["exit_code"] != 0 or "unknown sabotage" in arm["output_tail"].lower()
+
+
+def refuses_an_unrecognised_flag(path):
+    """Does this control set refuse an argument it does not know, or run anyway?
+
+    A control set that ignores an unrecognised flag answers every question with its
+    ordinary green report, so no caller can tell an honoured flag from an ignored one —
+    and the ignored reading is the green one. `--list-sabotages` against such a set
+    hands back its whole suite report, and a reader that splits that into words gets
+    sabotage arms called `ok`, `CLEAN:` and `9/9`, runs each, and reads the resulting
+    refusals as caught sabotages. That is what this audit's own first draft did, and it
+    printed 25 findings that were all artefacts.
+
+    The refusal has to be in the **exit code**. A control set that prints a complaint
+    and exits 0 is still green to every caller reading the status, which is the same
+    defect one layer down. Three of the four control sets on this box ignored an
+    unrecognised flag until card `3165bed1`; all four refuse one now, so this predicate
+    guards a property rather than describing one.
+    """
+    arm = run_arm([sys.executable, path, NONSENSE_FLAG], "probe-unrecognised-flag")
+    if arm["timed_out"]:
+        return False
+    return arm["exit_code"] != 0
 
 
 def list_sabotages(path, clean_output):
@@ -453,6 +497,17 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
             )
             continue
         record["missing"] = False
+
+        # Asked before the clean arm, because it is a question about whether this
+        # control set can be asked anything at all. A set that ignores it still gets
+        # its clean arm and its sabotage probes — the existing capability probes cope
+        # with the old dialect — but the report no longer stays silent about it.
+        record["refuses_unrecognised_flag"] = refuses_an_unrecognised_flag(path)
+        if not record["refuses_unrecognised_flag"]:
+            result["findings"].append(
+                f"{module}: ignores an unrecognised flag and runs its ordinary report,"
+                f" so no flag sent to it can be shown to have been read"
+            )
 
         clean = run_arm([sys.executable, path], "clean")
         record["arms"].append(clean)
