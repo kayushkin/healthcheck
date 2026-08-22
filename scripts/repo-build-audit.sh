@@ -45,6 +45,17 @@
 # literal (forge, permission-store, redact), or a test written to tolerate the
 # service being absent (inber/server TestEventPublisherCreation).
 #
+# ⚠️ The `llm-bridge-hermes` entry in that list needs re-reading, and the 360th
+# pass corrected it here rather than leave it standing. It is true that the
+# tag is never selected, and it is NOT a reason the suite is safe to gate on:
+# it means those tests have never run. Measured 2026-08-22 over all 73 Go
+# repositories under the root -- two hold test files a default run omits,
+# llm-bridge-hermes (12 entry points behind `integration`) and llm-bridge-server
+# (4 behind three tags) -- and when the 355th pass executed the four gated files
+# for the first time, THREE WERE RED, one of them since the day it was written.
+# So a green from this stage is a claim about the files it compiled. That is why
+# --with-tests now records a scope line per repo; see repo_scope below.
+#
 # The single red is argraphments, and it is a TRUE defect, not a wolf: three
 # tests assert on static/dist/index.html, which is gitignored and which nothing
 # in the committed tree builds. See noteboard for the measurement and the fork.
@@ -284,6 +295,11 @@ MODE=build
 
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/repo-build-audit}"
+# The scope module --with-tests calls per repo. Overridable so a checkout elsewhere
+# can point at its own copy; when it is absent the report records UNSTATED per repo
+# rather than going quiet, because a missing scope and a clean scope must not read
+# alike. It lives outside this repository, which is why the absence has a name.
+SCOPE_MODULE="${SCOPE_MODULE:-$HOME/.nightly-shared/compiled_here.py}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d /tmp/repo-build-audit.XXXXXX)}"
 STAGE_TIMEOUT="${STAGE_TIMEOUT:-600}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
@@ -806,6 +822,11 @@ generated_with_nul=()   # "<repo>/<path>\t<nul count>" — named, never failed
 # names the repos it has no smoke for: an uncovered package that goes unnamed is
 # read as a covered one.
 without_check=()
+# --with-tests only: one line per repo saying which test files its `go test ./...`
+# did NOT compile. `go test ./...` omits tag-gated files without saying so, and the
+# fleet holds 16 such entry points; a green that does not state its scope is a claim
+# about the files it built, stated as a claim about the repo. Card `2e96a48b`.
+test_scopes=()
 # The two exclusions that used to leave no trace at all, and the reason this
 # accounting exists. Every OTHER way a directory leaves this sweep is already
 # announced — a linked worktree is listed in `worktrees`, a directory with no
@@ -1383,6 +1404,24 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
     fi
   done
 
+  # State what `go test ./...` did not compile, on the same clean clone the stages
+  # ran in and before it is reclaimed. Only under --with-tests: without that flag no
+  # test was executed here at all, so there is no green whose scope needs stating.
+  #
+  # The module lives in ~/.nightly-shared, which is NOT part of this repository, so
+  # a checkout on another box will not have it. When it is missing the report says
+  # so per repo rather than omitting the field: an absent scope and a clean scope
+  # read identically once they are both "no line", and only one of them is a fact.
+  if [ "$WITH_TESTS" -eq 1 ]; then
+    if [ -r "$SCOPE_MODULE" ]; then
+      scope_line=$(python3 "$SCOPE_MODULE" --scope "$ws/$name" go test ./... 2>&1) \
+        || scope_line="UNSTATED: $SCOPE_MODULE exited non-zero: $(echo "$scope_line" | tr '\n' ' ' | cut -c1-200)"
+    else
+      scope_line="UNSTATED: no scope module at $SCOPE_MODULE"
+    fi
+    test_scopes+=("$name	$scope_line")
+  fi
+
   secs=$(( $(date +%s) - repo_start ))
   if [ "$status" = "ok" ]; then
     ok=$((ok + 1))
@@ -1404,6 +1443,7 @@ printf '%s\n' "${results[@]}" |
   GO_VERSION="$(command -v go >/dev/null 2>&1 && go env GOVERSION || echo '')" \
   NODE_VERSION="$(command -v node >/dev/null 2>&1 && node --version || echo '')" \
   WITH_TESTS="$WITH_TESTS" \
+  TEST_SCOPES="$(printf '%s\n' ${test_scopes+"${test_scopes[@]}"})" \
   MODE="$MODE" \
   ONLY="$ONLY" \
   TOTAL="$total" OK="$ok" FAILED="$failed" UNGUARDED="$unguarded" NO_SMOKE="$no_smoke" \
@@ -1515,6 +1555,31 @@ if mode == "node":
     ]
 elif mode == "build":
     report["with_tests"] = os.environ["WITH_TESTS"] == "1"
+    # Gated on the ROWS the sweep actually produced, not on with_tests. Reading the
+    # flag here made the sweep-side condition unobservable: a guard stating a scope
+    # for a run that executed no test wrote a report identical to one that did not,
+    # so the case asserting it passed by being unable to fail.
+    if os.environ["TEST_SCOPES"].strip():
+        # What the test stage did not compile. `go test ./...` drops tag-gated test
+        # files silently, so a per-repo scope line is what stops the green this
+        # stage prints from claiming more than it measured. Every repo it ran over gets a
+        # row -- including the ones with nothing unbuilt, because "no row" would
+        # otherwise mean both "clean" and "never asked".
+        scopes = [
+            {"repo": r, "scope": s}
+            for r, _, s in (
+                line.partition("\t")
+                for line in os.environ["TEST_SCOPES"].splitlines() if line.strip()
+            )
+        ]
+        report["test_scope"] = scopes
+        report["test_scope_stated"] = len(scopes)
+        report["test_scope_unstated"] = [
+            row["repo"] for row in scopes if row["scope"].startswith("UNSTATED")
+        ]
+        report["repos_with_unbuilt_tests"] = [
+            row["repo"] for row in scopes if "did NOT build" in row["scope"]
+        ]
 elif mode == "nul":
     # The floor. A walk that reads nothing finds no NUL and reports a clean
     # fleet, so the count of files actually opened is the one number that tells

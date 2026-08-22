@@ -1195,6 +1195,69 @@ else
   echo "SKIP  node empty-sweep fixture (npm is not on PATH)"
 fi
 
+# ------------------------------------------------------- fixture TEST SCOPE
+# `go test ./...` omits tag-gated test files without saying so, and --with-tests
+# used to print a green over that silence. Card `2e96a48b`; measured 2026-08-22
+# over 73 Go repositories, two of which hold 16 such entry points, and when the
+# 355th pass first executed the four gated files THREE WERE RED.
+#
+# Two repositories, because one is not enough to tell the two failure directions
+# apart: `gated` has a test file behind an opt-in tag and `clean` has none, so a
+# wiring that reports everything and one that reports nothing each pass half.
+SCOPEFIX="$ROOT/with-gated-tests"
+mkdir -p "$SCOPEFIX"
+make_repo "$SCOPEFIX/gated" -
+make_repo "$SCOPEFIX/clean" -
+for r in gated clean; do
+  printf 'package %s\n\nimport "testing"\n\nfunc TestPlain(t *testing.T) {}\n' "$r" \
+    > "$SCOPEFIX/$r/plain_test.go"
+done
+# Two entry points and a helper, so a wiring that counts every func over-reports.
+printf '//go:build slow\n\npackage gated\n\nimport "testing"\n\nfunc TestGatedOne(t *testing.T) {}\nfunc TestGatedTwo(t *testing.T) {}\nfunc gatedHelper() {}\n' \
+  > "$SCOPEFIX/gated/gated_test.go"
+for r in gated clean; do
+  git -C "$SCOPEFIX/$r" add -A
+  git -C "$SCOPEFIX/$r" commit -qm tests
+done
+
+REPOS_DIR="$SCOPEFIX" REPORT="$ROOT/scope-with-tests.json" \
+  bash "$AUDIT" --with-tests >/dev/null 2>&1
+check "scope: every repo the test stage ran over gets a row, clean ones included" \
+      "2" "$(report_field "$ROOT/scope-with-tests.json" 'd["test_scope_stated"]')"
+check "scope: only the repo with a tag-gated test file is named as unbuilt" \
+      "['gated']" \
+      "$(report_field "$ROOT/scope-with-tests.json" 'd["repos_with_unbuilt_tests"]')"
+check "scope: the line counts entry points, not every func in the gated file" \
+      "yes" \
+      "$(report_field "$ROOT/scope-with-tests.json" \
+         '"yes" if any(r["repo"]=="gated" and "2 test funcs" in r["scope"] and "-tags slow" in r["scope"] for r in d["test_scope"]) else [r["scope"] for r in d["test_scope"]]')"
+# The other direction. A repo that really did build everything must SAY so:
+# silence there would be indistinguishable from a repo nobody asked about.
+check "scope: a repo with nothing gated states that it built every test file" \
+      "yes" \
+      "$(report_field "$ROOT/scope-with-tests.json" \
+         '"yes" if any(r["repo"]=="clean" and "built every test file" in r["scope"] for r in d["test_scope"]) else [r["scope"] for r in d["test_scope"]]')"
+
+# Without --with-tests no test ran, so there is no green whose scope needs
+# stating and the field must be absent rather than empty. An empty list would
+# read as "asked, and nothing was unbuilt".
+REPOS_DIR="$SCOPEFIX" REPORT="$ROOT/scope-no-tests.json" \
+  bash "$AUDIT" >/dev/null 2>&1
+check "scope: a run that executed no test claims no scope at all" \
+      "None" "$(report_field "$ROOT/scope-no-tests.json" 'repr(d.get("test_scope"))')"
+
+# The module lives outside this repository. When it is missing the report must
+# say UNSTATED per repo — an absent scope and a clean scope must not read alike,
+# which is the whole failure this wiring exists to remove, one layer up.
+SCOPE_MODULE="$ROOT/no-such-module.py" REPOS_DIR="$SCOPEFIX" \
+  REPORT="$ROOT/scope-missing-module.json" bash "$AUDIT" --with-tests >/dev/null 2>&1
+check "scope: a missing scope module is named, not silently read as clean" \
+      "['clean', 'gated']" \
+      "$(report_field "$ROOT/scope-missing-module.json" 'sorted(d["test_scope_unstated"])')"
+check "scope: a missing scope module names no repo as clean" \
+      "[]" \
+      "$(report_field "$ROOT/scope-missing-module.json" 'd["repos_with_unbuilt_tests"]')"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
