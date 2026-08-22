@@ -61,7 +61,8 @@ with `--sabotage __no_such_arm__`: a control set that honours the protocol refus
 and one that comes back green does not implement `--sabotage` at all.
 
 Making the four agree on one protocol would be better than reading four dialects. That
-is a change to other passes' instruments and is filed as its own card, not done here.
+is a change to other passes' instruments and is filed as its own card,
+`3165bed1-e789-4e77-b977-e34b395a3af9`, not done here.
 
 ## Reporting
 
