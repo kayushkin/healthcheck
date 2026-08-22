@@ -95,6 +95,7 @@ sabotage arms, all caught, measured 2026-08-22.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -127,6 +128,37 @@ KNOWN_UNCOVERED = {
 # that wedges fails the audit instead of holding the scheduler slot until the job's own
 # wall-clock cap kills the whole run and loses every result collected so far.
 ARM_TIMEOUT_SECONDS = 600
+
+# Three of the four control sets shell out to `go`, and on this box `go` is reachable
+# only through mise's shim directory, which a login shell puts on PATH and the scheduler
+# does not. `healthcheck/deploy.sh` prepends the same directory for the same reason.
+MISE_SHIM_DIRECTORY = os.path.expanduser("~/.local/share/mise/shims")
+
+# Indirection so the audit's own control set can take the toolchain away.
+find_executable = shutil.which
+
+
+def ensure_go_toolchain_on_path():
+    """Put `go` on PATH, or say why the audit cannot be carried out.
+
+    ⛔ Measured on this guard's first scheduled run: without it, three of the four
+    control sets die with `FileNotFoundError: 'go'` and the audit reports three red
+    clean arms. That reads as three broken instruments and is nothing of the kind — the
+    probe could not run, and a probe that could not run is not a negative result (215th
+    pass). So a missing toolchain refuses the whole audit rather than colouring it.
+    """
+    if find_executable("go"):
+        return None
+    if os.path.isdir(MISE_SHIM_DIRECTORY):
+        os.environ["PATH"] = MISE_SHIM_DIRECTORY + os.pathsep + os.environ.get("PATH", "")
+        if find_executable("go"):
+            return None
+    return (
+        "`go` is not on PATH and mise's shim directory did not supply it. Three of the "
+        "four control sets shell out to the Go toolchain and would all report a red "
+        "clean arm, which would read as three broken instruments rather than one "
+        "missing toolchain, so nothing was audited."
+    )
 
 
 def module_stem(filename):
@@ -265,7 +297,7 @@ OWN_CONTROL_SET = os.path.join(
 )
 
 
-def run_own_control_set(stream=sys.stdout):
+def run_own_control_set(stream=None):
     """Run this script's control set — clean arm and every sabotage — before auditing.
 
     An audit whose own instrument is broken cannot be read, whichever way it answers, so
@@ -488,7 +520,7 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
     return result
 
 
-def report(result, stream=sys.stdout):
+def report(result, stream=None):
     """Print which control sets ran, which arms ran, and every finding.
 
     Naming the sets is not decoration. This audit's own failure mode is reporting
@@ -563,6 +595,11 @@ def main(argv):
         print("\nthe audit's own control set is not sound; nothing was audited",
               file=sys.stderr)
         return 1
+
+    missing_toolchain = ensure_go_toolchain_on_path()
+    if missing_toolchain:
+        print(missing_toolchain, file=sys.stderr)
+        return 2
 
     root = os.path.expanduser(args.root)
     if not os.path.isdir(root):

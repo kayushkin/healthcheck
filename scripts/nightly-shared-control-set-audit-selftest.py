@@ -334,18 +334,87 @@ def case_report_names_every_control_set_it_ran(work):
 
 
 def run_main_quietly(argv):
-    """Drive the audit's own entry point without its report landing in this output."""
+    """Drive the audit's own entry point without its report landing in this output.
+
+    The nesting guard is set because this IS the audit's control set: without it, every
+    case that drives `main` makes the audit run this whole file again as a subprocess,
+    once per sabotage arm.
+    """
     import contextlib
     import io
+    previous = os.environ.get(audit_module.NESTING_GUARD_VARIABLE)
+    os.environ[audit_module.NESTING_GUARD_VARIABLE] = "1"
     sink = io.StringIO()
-    with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-        return audit_module.main(argv)
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            return audit_module.main(argv)
+    finally:
+        if previous is None:
+            os.environ.pop(audit_module.NESTING_GUARD_VARIABLE, None)
+        else:
+            os.environ[audit_module.NESTING_GUARD_VARIABLE] = previous
 
 
 def case_absent_root_exits_two_not_zero(work):
     """An audit that could not run must not read as an audit that found nothing."""
     code = run_main_quietly(["audit", "--root", os.path.join(work, "no_such_directory")])
     return code == 2, f"exit={code}"
+
+
+def case_absent_go_toolchain_refuses_the_audit(work):
+    """Three control sets need `go`. Without it they all go red, and that is not a
+    finding about them — it is the audit being unable to run."""
+    real_which = audit_module.find_executable
+    real_shims = audit_module.MISE_SHIM_DIRECTORY
+    audit_module.find_executable = lambda name: None
+    audit_module.MISE_SHIM_DIRECTORY = os.path.join(work, "no_such_shim_directory")
+    try:
+        root = build_fixture(os.path.join(work, "notoolchain"), modules=["alpha"],
+                             control_sets=[("alpha", CONFORMING)])
+        code = run_main_quietly(["audit", "--root", root])
+        return code == 2, f"exit={code}"
+    finally:
+        audit_module.find_executable = real_which
+        audit_module.MISE_SHIM_DIRECTORY = real_shims
+
+
+def case_shim_directory_supplies_the_toolchain(work):
+    """A PATH without `go` is not a refusal if mise's shims can still supply it."""
+    real_which = audit_module.find_executable
+    real_shims = audit_module.MISE_SHIM_DIRECTORY
+    shims = os.path.join(work, "shims")
+    os.makedirs(shims, exist_ok=True)
+    seen = []
+
+    def which_after_the_shims_are_added(name):
+        seen.append(os.environ.get("PATH", ""))
+        return shims + "/go" if shims in os.environ.get("PATH", "") else None
+
+    audit_module.find_executable = which_after_the_shims_are_added
+    audit_module.MISE_SHIM_DIRECTORY = shims
+    try:
+        complaint = audit_module.ensure_go_toolchain_on_path()
+        return complaint is None and len(seen) == 2, f"complaint={complaint} probes={len(seen)}"
+    finally:
+        audit_module.find_executable = real_which
+        audit_module.MISE_SHIM_DIRECTORY = real_shims
+
+
+def case_report_streams_are_late_bound(work):
+    """A `stream=sys.stdout` default is bound once, when the function is defined.
+
+    Both reporting functions had it, and the effect was that the audit's own
+    control-set report stepped over `contextlib.redirect_stdout` and landed in the
+    caller's output. Asserted on the signature because reproducing it needs the audit to
+    spawn this whole file eight times per case.
+    """
+    import inspect
+    bad = [
+        name for name, function in (("run_own_control_set", audit_module.run_own_control_set),
+                                    ("report", audit_module.report))
+        if inspect.signature(function).parameters["stream"].default is not None
+    ]
+    return not bad, f"eagerly bound stream default in {bad}"
 
 
 def case_findings_make_main_exit_one(work):
@@ -373,7 +442,10 @@ CASES = [
     ("a baselined gap is silent", case_uncovered_module_in_the_baseline_is_not_a_finding),
     ("a backup copy is not an instrument", case_backup_copies_are_not_modules),
     ("the report names what it ran", case_report_names_every_control_set_it_ran),
+    ("report streams are late bound", case_report_streams_are_late_bound),
     ("an absent root exits 2", case_absent_root_exits_two_not_zero),
+    ("an absent go toolchain refuses the audit", case_absent_go_toolchain_refuses_the_audit),
+    ("mise's shims supply the toolchain", case_shim_directory_supplies_the_toolchain),
     ("a finding makes main exit 1", case_findings_make_main_exit_one),
 ]
 
@@ -463,7 +535,14 @@ def _sabotage_an_absent_root_is_green():
     audit_module.main = forgiving
 
 
+def _sabotage_a_missing_toolchain_is_someone_elses_problem():
+    """Audit anyway with no `go`, and report three red clean arms as three findings."""
+    audit_module.ensure_go_toolchain_on_path = lambda: None
+
+
 SABOTAGES = {
+    "a-missing-toolchain-is-someone-elses-problem":
+        _sabotage_a_missing_toolchain_is_someone_elses_problem,
     "read-only-the-exit-code": _sabotage_read_only_the_exit_code,
     "assume-the-sabotage-flag": _sabotage_assume_the_sabotage_flag,
     "trust-the-arm-list": _sabotage_trust_the_arm_list,
