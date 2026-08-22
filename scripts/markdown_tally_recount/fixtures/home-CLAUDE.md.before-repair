@@ -1,0 +1,405 @@
+# Directives
+
+**Fail fast and loud.** Never swallow errors or mask failures. Propagate errors to the caller. If something is wrong, crash or log visibly at the point of failure — don't silently produce wrong results.
+
+**Single source of truth.** Never fabricate, fallback, or hardcode a value when a canonical source exists. No fallback chains, no narrower type copies, no hardcoded allowlists or ports. If the authoritative field is empty, leave it empty — don't guess.
+
+**Join on ids, never on names.** When one record points at another, reference it by the id assigned by the database that owns it. Names collide — two skills, two tools, two repos can share one — and a name-based join then picks the wrong row silently, staying correct right up until the second row appears. So before writing a join, find the owning source-of-truth service and take its id from there. If the target has no id, do not invent a local one and do not fall back to the name: first establish that the record should not exist at all, and if it should, create it in the owning store and use the id it hands back. Store the id. Carry the name alongside it only for display, and never read the name back to find the row.
+
+**Layers are transparent.** Adapters, bridges, and transport layers pass data through unchanged. No formatting, truncation, or lossy transforms in intermediate layers. Presentation belongs at the edge.
+
+**Names must tell the truth — rename up the stack.** A name that lies about what code does is a defect, not cosmetics. Whenever a change materially alters what a function/method/module *does* or *can do* (its responsibility, contract, or capability — not an internal tweak), renaming is part of that change, not a follow-up PR. After the change, walk up the call chain — direct callers, wrappers, interface methods, route/CLI handlers, params, docstrings — and update every name the old one no longer describes accurately. Propagate: site → callers → public surface → docs. Scope the rename to what actually changed meaning; don't churn unrelated names. Never defer it as "a rename later" — that PR never comes and the lie ships.
+
+**Completeness over brevity in names.** Prefer the complete, descriptive name over the short one. Do not truncate or abbreviate to save characters: brevity pressure is largely a human ergonomic concern — visible screen width, typing speed, working-memory load — and those concerns barely apply to model-maintained code, so they should not drive naming here. The empirical literature on human readers already favors full words: full-word identifiers measurably speed defect-finding over abbreviations and single letters, and abbreviating buys back none of the comprehension lost by dropping the full word. The one real limit found in that research — that *excessively* long names overload short-term memory — is itself a human-memory effect, so it constrains us even less. Optimize for a name that fully states the concept, not the shortest token that hints at it. This is not license to pad: every word must carry meaning (the truth-telling rule above still binds), but when choosing between a complete name and a terse one, choose complete.
+
+**Surface ambiguity before implementing.** When a task is ambiguous, vague, or admits multiple plausible interpretations, present the options and your assumptions before coding — never silently pick one and start implementing. If two readings of the request lead to materially different work, name them in 1-2 sentences each and ask which. Skip only for trivial edits (single-line fixes, typos, status checks).
+
+**No flattery, no reflexive concession.** Don't open with "Great question", "You're right", "Good catch", or similar warm-ups. When the user pushes back, don't capitulate by default — verify the claim first. If they're right, say so and fix it; if they're wrong or only partly right, say that plainly with the evidence. Agreement without grounding is noise and erodes trust.
+
+**Don't revert another agent's in-progress work.** When you find unfamiliar uncommitted edits, new files, or lines you don't recognize in a file you're touching, treat them as another agent's parallel work — keep them. They may be unrelated changes I want anyway. If your edit conflicts with what's already there, ask before overwriting; never `git checkout`/`git restore`/`git stash drop` someone else's working tree, and never delete files you didn't create. Only touch what your specific task requires.
+
+**Check skill-store before non-trivial tasks.** For any task beyond a trivial edit or question, query the skill-store registry for relevant SKILL.md entries before starting: `curl -s "http://localhost:8301/skills?q=KEYWORDS&limit=10"` (or via dash: `/api/skill-store/skills?q=...`). Pull promising hits with `GET /skills/{id}/files/SKILL.md` and follow their guidance. Skip only for truly trivial work (single-line fixes, status checks, simple questions).
+
+# Repos Overview
+
+This directory holds a personal infrastructure built around AI agent orchestration, media management, and communication.
+
+**These tables were silently incomplete for months. They were filled in on 2026-08-08 and now name every directory under `~/repos`.** Counted that night: 81 directories, of which **78 are git repositories** and three are not repos at all (`agent-bench`, `memory`, `sessions` — logs, one plan file, and session mappings). The tables named 50; the missing 31 now have rows. No listed repo is missing from disk, so there are no dead rows either.
+
+**Re-counted 2026-08-15, and the shape of the count has changed — read this before running the check below.** `ls -d ~/repos/*/ | wc -l` now answers **106**, against the 81 stated above, which reads like 25 missing rows. It is one. **24 of those 106 directories are `-wt-` git worktrees** — throwaway checkouts other agents leave behind, not projects, and they get no row. Subtract them and there are **82 real directories: 79 git repositories and the same three non-repos.** The tables now carry **82 rows** — the one genuine absentee, `job-store`, was added tonight and is in the Store Family section below. Including worktrees, 103 of the 106 directories are git repositories, and that number means nothing here.
+
+**Re-counted 2026-08-18, after adding `quote-store`.** `ls -d ~/repos/*/ | wc -l` answers **113**, of which **30 are `-wt-` worktrees**: **83 real directories — 80 git repositories and the same three non-repos.** The tables carry **83 rows**, so they match again. The new row is `quote-store` in the Store Family section below; it was created that day, not found missing. The worktree count moves on its own as other agents come and go, so re-run the two checks below rather than trusting these numbers.
+
+⚠️ **What the gap cost, so it is not repeated:** twelve of the 31 absentees were **running systemd services with no row** — `auth-store` :8303, `skill-store` :8301, `kanban-store` :8305, `event-store` :8308, `permission-store` :8304, `repo-store` :8306, `bundle-store` :8307, `usage-store` :8185, `mailstack` :8195, `marginalia` :8192, `producer` (`producerd`) :8310, `apiauth` :8190. **Four of them — auth-store, skill-store, kanban-store, event-store — are backends `~/AGENTS.md` orders every agent to use**, so the global prompt could send an agent to a service this file never mentioned. They now live in the Store Family section below.
+
+Re-take the count before trusting this paragraph rather than assuming it holds. Exclude the worktrees, or the raw count is 24 too high:
+
+```bash
+# every real directory with no row in this file
+for d in ~/repos/*/; do case "$d" in *-wt-*) continue;; esac
+  n=$(basename "$d"); grep -qF "**$n**" ~/CLAUDE.md || echo "NO ROW: $n"; done
+# every row in this file with no directory
+grep -oP '^\| \*\*\K[^*]+' ~/CLAUDE.md | while read -r n; do [ -d ~/repos/"$n" ] || echo "DEAD ROW: $n"; done
+```
+
+Both printed nothing on 2026-08-15.
+
+## Core Agent System
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **inber** | Framework/CLI | Go | Multi-agent orchestration framework built on Anthropic SDK. Supports interactive chat, single-shot runs, server mode with bus integration, session management, and persistent memory. 10 agents with Irish mythology names. |
+| **agentkit** | Library | Go | **(deprecated, replaced by tool-store; now has zero importers)** Reusable tools for Claude-based agents. The old note here said inber still imported it pending Stage 6 — measured false 2026-08-08: no `go.mod` in `~/repos` requires it and no Go file imports it, inber included. inber names it only in prose under `docs/`. Last commit 2026-04-12. Nothing depends on it, so nothing blocks retiring it. |
+| **tool-store** | Service + Library | Go | Canonical registry of tools (MCP servers, CLI commands, in-process Go impls) for harnesses, on `:8302`. SQLite at `~/.config/tool-store/tool-store.db`. Replaces agentkit; ports its 11 in-process tools and seeds them disabled. `POST /provision` returns Claude Code MCP config with env values resolved from auth-store. |
+| **agent-store** | Library | Go | Single source of truth for agent identity and config. Stores identity, runtime configs, tools, limits, and memories in SQLite (`~/.config/agent-store/agents.db`). |
+| **model-store** | Service + Library + CLI | Go | Centralized model registry, auth, and usage tracking. Manages API keys, OAuth tokens, model credentials across providers (Anthropic, OpenAI, Google, local). SQLite backend. |
+| **aiauth** | CLI Tool | Go | LLM provider authentication management. OAuth2 flows, API key storage, token refresh for multiple providers. Commands: `login`, `status`, `key`, `refresh`. |
+| **forge** | Library | Go | Workspace and preview management for orchestrated agents. Manages isolated git worktree slots, builds, and preview deployments tied to agent sessions. |
+| **producer** | Service | Go | A single point of contact across every session, todo and task on this box: one premium agent that knows the status of all work, dispatches workers, and interrupts sparingly. Daemon is `producerd`, listening on `:8310`. Second attempt after `claude-orchestrator` was scrapped for cost. Read its `ARCHITECTURE.md` first — it carries the current map and the outstanding issues. |
+| **claude-orchestrator** | CLI | Go | **(scrapped for being expensive; replaced by `producer`)** `orch` spawns, injects into, stops, compacts and names Claude Code sessions; `orch-watchdog` is meant to run as a scheduler shell job and flag sessions running past a threshold. Last commit 2026-07-19. |
+| **inber-cli** | CLI | Go | Thin HTTP client for the inber server API. Commands plus ANSI colour and output formatting; no logic of its own. |
+| **agent-bench** | Data | — | **Not a git repository.** inber bench session logs under `logs/bench/` and a `.inber/sessions.db`. |
+| **memory** | Data | — | **Not a git repository.** One planning document, `plans/llmux-nats-bus-integration.md`. Unrelated to `memory-store`. |
+| **sessions** | Config/Data | — | Session tracking folder containing session mappings (sessions.json) for Claude Code sessions. Also not a git repository. |
+
+## Store Family (canonical registries)
+
+Each of these owns one kind of record and hands out the id everything else joins on. Four are named in `~/AGENTS.md` as the backend an agent **must** use for a given job, so an agent can be sent to one of these without this file ever mentioning it — that was true for months and is what this section fixes. `model-store`, `agent-store` and `tool-store` are the same family and are listed under Core Agent System; `harness-store`, `memory-store`, `hook-store`, `snapshot-store` and `repo-store`'s `repodetect` sit under the LLM Bridge tables.
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **auth-store** | Service | Go | `:8303`. The credential vault: OAuth provider plugins, interactive login, server-side refresh of stored tokens, audit log. dash resolves its Google Calendar token from here. Replaces `apiauth`. **`~/AGENTS.md` orders every agent to use it for credentials, API keys and OAuth.** |
+| **skill-store** | Service | Go | `:8301`. Registry of Claude Code / Agent `SKILL.md` skills, ingested by cloning an upstream repo — or, since 2026-08-04, by reading a directory on this host — and walking it for `SKILL.md`. Data in `~/.config/skill-store/`. **The Directives section above tells every agent to query it before any non-trivial task.** |
+| **kanban-store** | Service | Go | `:8305`. Board and card *placement*, treating **noteboard as the source of truth for card content** — it stores where a card sits, not what it says. Publishes an entity-type registry so agents can resolve entity refs themselves; deliberately dumb, it does not proxy to those services. |
+| **event-store** | Service | Go | `:8308`. Backend for the personal events radar: `sources` (where to look — `watch`, `research` or `scout`, each with its own cadence and effort tier) and the candidate `events` they yield, approved onto Google Calendar from the Suggestions panel. **See the events rules in `~/AGENTS.md`: send `"status":"proposed"` on every source you add, and never self-approve.** |
+| **job-store** | Service | Go | `:8311`. The job radar, and deliberately the same shape as event-store: `sources` (where to look — `board`, `research` or `scout`, each with its own `cadence_hours`), the `listings` they yield, the `documents` you apply with (resume and cover-letter variants, plus tailoring requests) and the `applications` made from them. Six canonical role families served by `GET /role-families`, so no UI builds a filter from observed values. **Everything a scout finds arrives `proposed`; nothing self-approves** — `PATCH /sources/{id}` is the decision channel. Routes are rooted at `/`, not `/api` (`GET /listings`, `GET /sources`), and dash proxies them at `/api/jobs/*` to back its whole **Jobs** page — listings always on screen, with Wanted, Suggestions, Radar, Documents and Applications panels around it, and six Playwright specs. ⚠️ dash's `/api/jobs/*` is job-store, **not** the scheduler; the scheduler's own `/api/jobs/` is reached at dash `/api/scheduler/jobs/*`. Driven by two enabled scheduler jobs: `job-radar-dispatch` (57, daily 08:30) and `job-tailor-dispatch` (58, `*/5`). Module `github.com/kayushkin/job-store`, root package `jobstore`, SQLite at `~/.config/job-store/job-store.db` (WAL, foreign keys on). `CONTRACT.md` is the route table. ⚠️ The repo has **no `origin` remote**, so nothing here has left this box. |
+| **quote-store** | Service | Go | `:8309`. Quotes worth keeping, split into the three things a quote actually is: the passage (`quotes`), who said it (`authors`) and the book, talk or essay it came out of (`works`). A quote points at both by id, so renaming an author moves every quote of theirs instead of orphaning them. Passages dedupe on a signature — the text lowercased with punctuation and repeated whitespace removed — so the same passage pasted twice with different quote marks lands on one row. Search is an fts5 index over the passage, its tags and note, **and** the author and work names, kept true by triggers on every write path including a rename and a retitle. `DELETE` is reversible, `?hard=true` purges and frees the signature. `GET /quotes/random?format=text` renders the passage with its attribution for a digest or a shell prompt. Routes are rooted at `/`, and `CONTRACT.md` is the route table. dash proxies them at `/api/quotes/*` to back its **Quotes** page (top navbar → 📖 Quotes): the passages with the attribution the store joined, tag chips that double as the tag list and the filter, an author filter, a shuffle and a small composer, with eight Playwright specs in `dash/e2e/quotes.spec.ts`. Module `github.com/kayushkin/quote-store`, root package `quotestore`, SQLite at `~/.config/quote-store/quote-store.db` (WAL). Built with `-tags sqlite_fts5`, which is not optional: without it the binary starts and dies at the first write. ⚠️ Like job-store, the repo has **no `origin` remote**. |
+| **permission-store** | Service | Go | `:8304`. Rule engine for tool-call gating across the harness ecosystem, backing the `bridge_perm` MCP server in `llm-bridge-claudecode`. Its README calls it **step 1 of 7**: the AST-based Bash command splitter is done, and the service skeleton, seed rules, rules editor and ask-flow UI are not. |
+| **repo-store** | Service | Go | `:8306`. Canonical registry of repositories and their detected signature — the stable, session-independent answer to "what is this repo?" (languages, frameworks, build tools, test tools) as a flat tag set. Those tags feed the bundle resolver. Boundary against forge: forge owns ephemeral session-scoped workspaces, repo-store owns durable repo identity. |
+| **bundle-store** | Service | Go | `:8307`. Registry of curated, inheritable **session bundles** — named sets of skills + tools, with optional model/effort defaults, selected for a session by repo tags plus task tags — plus the `/resolve` composition endpoint. Members are stored as skill-store and tool-store **ids**, with names carried alongside for display only. |
+| **usage-store** | Service + Library | Go | `:8185`, binary `usage-store-server`. Per-request token accounting (model-store is a caller) plus subscription-limit snapshots. Sub-packages read Claude OAuth subscription usage from the Anthropic API and the latest `RateLimitSnapshot` the Codex CLI writes into `~/.codex/sessions/`. |
+| **apiauth** | Service | Go | `:8190`. **Legacy** — the OAuth2 credential service that auth-store replaced, still running and still listening. Google and Microsoft providers. `mailstack` keeps a package named `apiauth` for import compatibility, but it now talks to auth-store on `:8303`. |
+
+## LLM Bridge (Chat & Agent Harness System)
+
+The llm-bridge ecosystem is the current default for chat and agent management. It replaced the older per-agent NATS adapters (claude-code-adapter, openclaw-adapter), which were decommissioned 2026-06-05 (local repos removed; GitHub repos archived).
+
+### Core
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **llm-bridge** | Library | Go | Canonical message types (`msg/`) and bridge interfaces (`bridge/`). The lingua franca for the entire ecosystem — all harnesses and providers import this. |
+| **llm-bridge-server** | Service | Go | Central HTTP gateway and session server. Manages harness lifecycle, SSE event streaming, credential bindings. Orchestrates agent-store, memory-store, harness-store, model-store. |
+| **llm-bridge-adapter** | Service | Go | NATS bus adapter bridging llm-bridge-server with the inber messaging ecosystem. Translates between NATS pub/sub and HTTP/SSE. |
+| **llm-bridge-runner** | Daemon | Go | Registers a remote machine with an llm-bridge-server and accepts harness-spawn requests over a single **outbound** WebSocket, so the server can drive harness subprocesses on machines behind NAT without inbound SSH or a VPN. |
+
+### Provider Bridges (LLM API translation, stateless format converters)
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **llm-bridge-anthropic** | Library | Go | Converts canonical `msg.Conversation` ↔ Anthropic SDK MessageNewParams. Handles alternation fixing, tool choice, thinking blocks, images, documents. |
+| **llm-bridge-openai** | Library | Go | Converts canonical `msg.Conversation` ↔ OpenAI ChatCompletionRequest. Tool handling, response formats, streaming. |
+| **llm-bridge-google** | Library | Go | Converts canonical `msg.Conversation` ↔ Google Gemini API GenerateContentRequest. Safety settings, cached content, code execution, streaming. |
+| **llm-bridge-openrouter** | Library | Go | Provider bridge for OpenRouter multi-model API. (scaffold) |
+
+### Harness Bridges (Agent subprocess management, stdin/stdout NDJSON JSON-RPC)
+
+**"(scaffold)" below means a stub, and it has a measurable fingerprint** — check it before believing the label. A real scaffold is one 34-line `main.go` that answers `-version` and `-discover` and then prints "not yet implemented" and exits 2; its binary is a 2.41 MB build from 2026-05-10, byte-identical across all of them; it scores 1/22 on the conformance matrix. Two rows carried the label wrongly for months (cline and aider, corrected below), so an unchecked "(scaffold)" is a claim, not a fact.
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **llm-bridge-claudecode** | CLI | Go | Wraps Claude Code CLI via `--input-format stream-json`. Bidirectional process, message injection, usage aggregation, session resumption/forking. |
+| **llm-bridge-jig** | CLI | Go | Profile manager harness for Claude Code. Loads YAML profiles from `.jig/profiles/` with inheritance and env var substitution. |
+| **llm-bridge-gemini** | CLI | Go | Wraps Google Gemini CLI agent. (scaffold) |
+| **llm-bridge-codex** | CLI | Go | Wraps Codex CLI agent. |
+| **llm-bridge-hermes** | CLI | Go | Bridges to Hermes Agent API (OpenAI-compatible HTTP with SSE). |
+| **llm-bridge-inber** | CLI | Go | Bridges to inber HTTP API. |
+| **llm-bridge-openclaw** | CLI | Go | Harness for the OpenClaw agent. Drives it over the OpenAI-compatible `POST /v1/chat/completions` endpoint and reads events by tailing OpenClaw's JSONL session files. (Not a WebSocket client — that description was wrong and led a todo to record a design blocker that did not exist.) |
+| **llm-bridge-nanoclaw** | CLI | Go | Container subprocess harness for NanoClaw (Docker). |
+| **llm-bridge-commander** | CLI | Go | Bridges to Commander (Rust/Tauri desktop app). (scaffold) |
+| **llm-bridge-cline** | CLI | Go | Wraps Cline CLI. **Implemented, not a scaffold** — measured 2026-08-08: 1,037 lines over `main`/`handler`/`process`/`translate`/`config`/`auth`, three test files, `go build` and `go test` green, and it scores 3/22 on the stored conformance matrix. A real scaffold here scores 1/22. |
+| **llm-bridge-aider** | CLI | Go | Wraps Aider CLI. **Implemented, not a scaffold** — measured 2026-08-08: 912 lines over the same file set, three test files, `go build` and `go test` green, binary rebuilt 2026-07-31. It scores **7/22 on the conformance matrix, the joint-highest of all seventeen harnesses** — level with Claude Code and above codex, hermes, jig, openclaw, inber and nanoclaw. `llm-bridge-goose`'s own source calls it one of the "implemented stateless harnesses". |
+| **llm-bridge-goose** | CLI | Go | Bridges to Goose agent framework. (scaffold) |
+| **llm-bridge-roocode** | CLI | Go | Wraps Roo Code CLI. (scaffold) |
+| **llm-bridge-autohand** | CLI | Go | Bridges to Autohand Code CLI via ACP-over-stdio. (scaffold) |
+| **llm-bridge-dexto** | CLI | Go | REST+SSE client harness for Dexto. (scaffold) |
+| **llm-bridge-copilotcli** | CLI | Go | Wraps the GitHub Copilot CLI (`copilot`), translating its Agent Client Protocol JSON-RPC event stream into canonical `msg.Event`. ⚠️ Its README badge still reads **planning phase**, but the code is not a scaffold — `handler`/`discover`/`config`/`identity_store` plus block, chain and compact tests, last commit 2026-07-31. Design rationale is spread over `DESIGN.md`, `BILLING.md` and `ACP-PROTOCOL.md`. |
+| **llm-bridge-forgecode** | CLI | Go | Wraps ForgeCode (npm `forgecode`). ForgeCode is a one-shot CLI, so the bridge spawns one `forge -p <text>` **per turn**, streams its stdout line by line as text deltas, and emits an aggregate `result` event when the process exits. |
+| **llm-bridge-kilocode** | CLI | Go | Wraps Kilo Code. Spawns `kilo serve` as a child process and proxies the canonical protocol onto its HTTP + NDJSON + SSE surface (create/fork, send, summarize, abort). |
+
+### Store Libraries & UI
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **harness-store** | Library | Go | SQLite registry for harness instances, credential bindings, and SSH transport config. |
+| **memory-store** | Library | Go | SQLite vector memory store with semantic search, importance decay, compaction, and HTTP handlers. |
+| **log-store** | Service | Go | Event logging for llm-bridge sessions. Stores events, materializes message history, forwards to logstack. |
+| **bridge-ui** | Library | React/TS | Reusable React component library (`@kayushkin/bridge-ui`). Session hooks, instance management, SSE client. |
+| **llmux** | Service | Go + React/TS | Agent harness deployment and management dashboard built on llm-bridge. Token auth, proxies to llm-bridge-server. |
+| **hook-store** | Library | Go | SQLite registry of bridge-managed harness hooks — each row a handler (harness, event, matcher, shell command) bound to a `global`, `instance` or `session` scope. The server queries it at session spawn to decide which hooks to wire into the harness's native mechanism. A pure data layer: it does not execute hooks, render settings JSON, or talk to harnesses. |
+| **snapshot-store** | Library | Go | Point-in-time file snapshots taken before and after tool calls (Claude Code `Edit`/`Write`) so the UI can render before/after diffs. Metadata in SQLite; raw content as content-addressed blobs in a bare git repo, which gets compression and dedup for free. |
+| **repodetect** | Library | Go | The repository-signature ruleset: a pure `Detect(path) → Signature` plus tag helpers, reporting which languages, frameworks, build tools and test tools a repo uses. Split out of the repo-store module on 2026-07-28 so a consumer can take the ruleset without pulling in the service. |
+| **llm-bridge-tui** | CLI | Go | Terminal client for an llm-bridge-server. One binary, two modes: a Bubble Tea **browser** (session list, create form, live tail, interactive send and interrupt) and a **headless tail** for one session, with SSE reconnect via `Last-Event-ID`. |
+| **chat-core** | Library | TypeScript | `@kayushkin/chat-core` — the data layer under the **dashv2** chat surface. The client renders from memory and the network only reconciles in the background: sub-10ms session switching, a warm cache of recent sessions, optimistic mutations, and **non-destructive** OTel/rollout dedup that annotates rather than discards. Wire contract in `docs/WIRE.md`. |
+
+## Communication & Messaging
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **bus** | Library | Go | Lightweight message bus for the inber ecosystem. Pub/sub with SQLite persistence via NATS JetStream. HTTP endpoints for publish/ack/history, WebSocket for real-time subscriptions. |
+| **si** | Service | Go | Communications layer routing messages between external platforms and inber I/O feeds. Adapters for matterbridge (Discord, Telegram, Slack), WebSocket, and TUI. |
+| **multichat** | Service | Go + React | Matrix chat server integration bridging Telegram, WhatsApp, Signal, Discord via matterbridge into unified interface. Uses Synapse Matrix with mautrix bridges. |
+| **mailstack** | Service | Go | `:8195`. Centralized read/write email behind dash's Mail page, across Gmail, Outlook (Microsoft Graph) and PrivateEmail (IMAP/SMTP), with multiple accounts per provider. ⚠️ `PLAN.md` still says *"planning, no code yet"* and was last touched 2026-04-17, while the service is running and listening — trust the code over the plan. |
+| **android-bridge** | Client | Kotlin (Android + Wear OS) | Phone and watch client for push-to-talk voice interaction with any agent: watch → phone over MessageClient/BLE, phone → `si` over an authenticated WebSocket, then NATS → llm-bridge-server, and the response reverses. Agent-agnostic; Apache 2.0. |
+
+## Web & Dashboard
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **kayushkin.com** | Service | Go + React/TS | Personal website and dashboard hub. User auth, manga reader, podcast support, music display, contact forms. JWT-based auth. |
+| **dash** | Service + Web App | Go + React/TS | The primary host for the BridgeUI chat at `dash.kayushkin.com`. Mounts every `@kayushkin/bridge-ui` page at the root (Chat, Instances, Sessions, Auth, Usage, Settings, Skills, Tools, Conformance) and proxies `/api/bridge/*`, `/api/skill-store/*`, `/api/tool-store/*`, etc. to their backend services. Also hosts non-bridge pages: agents, calendar, notes, quotes, mail, scheduler, forge, topology. **(replaces the older standalone llmux dashboard for the chat surface)**. Systemd user unit: `dash-server.service`. |
+| **inber-party** | Service | Go + React/TS | RPG-themed dashboard visualizing AI agents as adventurers. Camp view, quest board, character sheets, real-time WebSocket updates, pixel-art Celtic theme. PostgreSQL-backed. |
+
+## Media & Content Services
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **bookstack** | Service | Go | Book library management. Auto-import from inbox with calibre conversion, metadata extraction, cover thumbnails, bulk rename. |
+| **downloadstack** | Service | Go | Multi-source download queue with aggregated search across media sources (books, manga, podcasts, audiobooks). Format detection, multi-source fallback with retry. |
+| **videostack** | Service | Go | Plex library API proxy. Exposes Plex media library via REST with caching, thumbnail serving, refresh. |
+| **marginalia** | Service | Go | `:8192`. A book wiki that builds itself as you read: feed it a chapter and it extracts people, places, artifacts, organizations, events and concepts, plus the facts and relations between them, into a local SQLite graph. Every fact is anchored to a source page, so entity pages filter by your current reading position — no spoilers. Same pattern as noteboard, proxied through dash for the frontend. |
+
+## Infrastructure
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **logstack** | Service | Go | Centralized logging for the inber ecosystem. Unified JSON log format, file-based JSONL storage by date/source, REST API, multiple output formats. |
+| **healthcheck** | Service | Go | Infrastructure health monitoring. HTTP checks, systemd monitoring, version drift detection, status API with alerting. |
+| **scheduler** | Service | Go | Centralized job scheduler with cron-based scheduling, SQLite storage, REST API, and Google Calendar integration. |
+| **workflow** | Service | Go | Workflow engine for multi-step pipelines over llm-bridge agents and other services: a DAG of `agent`, `http`, `script`, `branch` and `parallel` nodes with guarded edges. **A stub** — its own README says the types and HTTP surface are sketched and execution is not implemented. Not running. |
+
+## Other
+
+| Project | Type | Language | Description |
+|---------|------|----------|-------------|
+| **argraphments** | Service | Go + HTMX/Vite | Conversation-to-argument-tree app. Whisper transcription, Claude structure extraction, SQLite storage, HTMX frontend. |
+| **noteboard** | Service | Go | Unified notes/todos/ranking-lists service (SQLite + FTS5, REST API on :8191). Markdown bodies, JSON tags, full-text search, rerank. Canonical backend for dash `/notes` page (proxied via `/api/noteboard/*`). Systemd user unit: `noteboard.service`. |
+| **cc-demo** | Docs/Samples | — | Samples and documentation for demonstrating Claude Code capabilities. |
+| **miditab** | Library | TypeScript | npm `miditab` — converts MIDI files into ASCII tablature (guitar, bass, ukulele, mandolin, banjo) or MusicXML sheet notation. Zero runtime dependencies; runs in the browser and in Node. |
+| **renodmv-cli** | CLI | Python | Browse Reno DMV appointment types from the terminal and deep-link straight to the booking page. Single `renodmv.py`, needs `curl_cffi`. Covers 40 appointment types across two queues, 13 of them bookable online. |
+| **claude-squad** | Vendored third-party | Go | Upstream `smtg-ai/claude-squad` — a terminal app that manages multiple Claude Code, Codex, Gemini and Aider agents in separate workspaces. **Not ours**; carries local commits (a boot-and-answer smoke for the repo guard). |
+| **happy** | Vendored third-party | TypeScript | Upstream mobile and web client for Claude Code and Codex with end-to-end encryption (iOS, Android, web). **Not ours**; pnpm monorepo, last local commit 2026-04-26. |
+
+## Google Calendar
+
+To create, update, or delete Google Calendar events, always use the dash-server API. Never hit the Google Calendar API directly, and **do not use the "claude.ai Google Calendar" MCP connector (or any other MCP calendar tool)** even when one is offered — this endpoint is the only supported path.
+
+**Endpoint:** `POST http://localhost:8101/api/calendar/google`
+
+**Auth:** send `Authorization: Bearer $DASH_TOKEN` (the token dash-server was started with — read it from the running unit's `DASH_TOKEN` env). A `dash_token` or `token` cookie also works. There is no localhost bypass; an unauthenticated call returns 401.
+
+The backend automatically injects the user's timezone from Google Calendar settings if not provided. You do not need to specify a timezone — just use bare ISO datetimes.
+
+```bash
+# Create an event
+curl -s -X POST http://localhost:8101/api/calendar/google \
+  -H "Authorization: Bearer $DASH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "summary": "Event title",
+    "start": {"dateTime": "2026-04-15T18:30:00"},
+    "end": {"dateTime": "2026-04-15T19:00:00"},
+    "location": "Optional location",
+    "description": "Optional description"
+  }'
+
+# Update an event
+curl -s -X PUT http://localhost:8101/api/calendar/google/<eventId> \
+  -H "Authorization: Bearer $DASH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "summary": "Updated title", "start": {"dateTime": "..."}, "end": {"dateTime": "..."} }'
+
+# Delete an event
+curl -s -X DELETE http://localhost:8101/api/calendar/google/<eventId> \
+  -H "Authorization: Bearer $DASH_TOKEN"
+```
+
+Auth tokens and timezone are handled by the backend. dash-server resolves the Google OAuth token from **auth-store** (`GET http://127.0.0.1:8303/api/resolve/google?account=default`) and proxies to the Google Calendar API — verified in `dash/server/api_calendar.go`. (This used to go through `apiauth`, which auth-store has since replaced.)
+
+## Scheduler (cron jobs)
+
+Centralized cron scheduler on `localhost:8092`. Auth via `Authorization: Bearer $SCHEDULER_TOKEN` only if the server was started with `SCHEDULER_TOKEN` set (currently unset on this host — omit header). Jobs are stored in SQLite at `~/.scheduler/scheduler.db`.
+
+Two job types: **shell** (executes `sh -c <command>`) and **agent** (invokes a Claude-based agent with a prompt). Schedules use standard 5-field cron (robfig/cron).
+
+A shell job's wall-clock cap is **per-job**: `timeout_seconds` on create or PATCH, `0` meaning the 5-minute default. Set it generously for anything that legitimately runs long (`harness-watch` is 1800; four of the five nightly repo guards are 3600, and `repo-elf-guard` is 600) — the cap is enforced by killing the job's whole process group, so a job that outlives it is killed, not left to run. A tick that arrives while the previous run of that same job is **still in flight is dropped, not stacked**, so a slow job can no longer pile up concurrent copies of itself.
+
+```bash
+# List jobs
+curl -s http://localhost:8092/api/jobs
+
+# Create a shell job (e.g. poke an HTTP endpoint every 5 min)
+curl -s -X POST http://localhost:8092/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "disk-root health check",
+    "description": "Hits healthcheck /api/check/disk-root",
+    "schedule": "*/5 * * * *",
+    "type": "shell",
+    "command": "curl -sfS -X POST http://localhost:8099/api/check/disk-root"
+  }'
+
+# Create an agent job
+curl -s -X POST http://localhost:8092/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "daily summary",
+    "schedule": "0 8 * * *",
+    "type": "agent",
+    "agent": "claude-code",
+    "prompt": "Summarize yesterday's activity…"
+  }'
+
+# Run a job immediately
+curl -s -X POST http://localhost:8092/api/jobs/<id>/run
+
+# Enable/disable
+curl -s -X PATCH http://localhost:8092/api/jobs/<id> \
+  -H "Content-Type: application/json" -d '{"enabled":false}'
+
+# Give a long-running job its own wall-clock cap (0 = the 5-minute default)
+curl -s -X PATCH http://localhost:8092/api/jobs/<id> \
+  -H "Content-Type: application/json" -d '{"timeout_seconds":3600}'
+
+# Edit any other field — prompt, schedule, command, agent, model, workspace_id …
+curl -s -X PATCH http://localhost:8092/api/jobs/<id> \
+  -H "Content-Type: application/json" -d '{"prompt":"…","schedule":"0 6 * * *"}'
+
+# Hold (pause) a job until a future time
+curl -s -X POST http://localhost:8092/api/jobs/<id>/hold \
+  -H "Content-Type: application/json" -d '{"days":7}'     # or {"until":"2026-05-01T00:00:00Z"}
+curl -s -X DELETE http://localhost:8092/api/jobs/<id>/hold  # clear hold
+
+# Run history (status, output, timing per run)
+curl -s http://localhost:8092/api/jobs/<id>/runs
+
+# Delete job
+curl -s -X DELETE http://localhost:8092/api/jobs/<id>
+```
+
+`PATCH` takes **every** job field, not just `enabled`. Send only the fields you are changing. It refuses rather than half-obeys: a misspelled field name, an unparseable cron expression, or an edit that would leave the job unrunnable (a shell job with no command, an agent job with no prompt) is a 400. A successful edit reloads the schedule, so it takes effect on the **next tick** — editing the DB by hand and forcing a reload with a no-op PATCH is no longer needed, and the row you edit by hand is now also the row the next run executes.
+
+**Re-measured live 2026-08-13 on a disposable job, and this is now true of the running service too.** For five days this section carried a ⛔ block saying the opposite — that the deployed binary silently dropped every field but three and answered `200` — on the strength of a 2026-08-08 measurement plus the binary's build date. `~/bin/scheduler` was rebuilt **2026-08-11 20:33**, after commit `863868a` landed, and nobody re-measured. Verified this time by creating a throwaway job and reading it back: `PATCH {"schedule":"0 6 * * *","command":"echo CHANGED"}` → the row really changed; `{"scheduel":…}` → **400** `unknown field`; `{"schedule":"not a cron"}` → **400**; `{"command":""}` on a shell job → **400** `command is required for shell jobs`. The DB-surgery workaround is obsolete, as originally written. **A build date is not a deploy check — re-measure.**
+
+⚠️ **You cannot create a disabled job through the API.** The `POST /api/jobs` request struct has no `enabled` field at all (`internal/api/api.go`) and `db.go` sets `Enabled = true` on insert. The strict decoder rejects `{"enabled":false}` with a **400** `json: unknown field "enabled"` (measured live 2026-08-13), so you learn it failed rather than getting a live cron job you believed was off. Create it, then PATCH `{"enabled":false}`.
+
+Shell jobs return status `success` or `error` based on exit code; `output` field in run history captures combined stdout+stderr (use `-f` with curl so 5xx becomes non-zero exit → `error` status → visible in `/runs`). Two further statuses mean the run did not finish on its own terms: `timeout` (it exceeded `timeout_seconds` and its process group was killed) and `interrupted` (the scheduler process died mid-run — a crash, an OOM kill, a deploy restart — and the run was closed out at the next startup). A run is never left in `running` by a process that is gone.
+
+## Noteboard (notes, todos, ranked lists)
+
+Canonical store for personal notes, todos, and ranked lists. Agents should read and write directly to the noteboard REST API on `localhost:8191`. Dash also proxies it at `/api/noteboard/*` for the browser UI, and *that* surface is behind dash's auth. ⚠️ noteboard itself has no auth at all, and it is not on the local socket — it listens on `*:8191` with no firewall rule, so anything that can route to this host has full read and write.
+
+Every item has a `type` of `note`, `todo`, `rank`, or `workspace`. Title is required; body is markdown. Status defaults to `open`; use `done` to complete a todo and `archived` to archive one.
+
+**Deletion in this store does not destroy data.** `DELETE` is reversible: it stamps `deleted_at` and the row stays, dropping out of every read path (list, get, search, tags, lists, count). It does *not* touch `status` — archiving is a state you chose for a live item, deletion is the item being taken away, and collapsing the two means a restore can't tell them apart. `POST /api/items/{id}/restore` brings it back in exactly the state it was deleted in. Every update, delete, restore, hold, unhold and purge writes a snapshot to `item_revisions`, readable at `GET /api/items/{id}/revisions`. `?hard=true` still purges the row, but snapshots first — reach for it only for genuinely heavy data.
+
+⚠️ **An UPDATE can still destroy data, so read before you overwrite.** The snapshot is partial: it covers 8 of the 20 item columns (`title`, `body`, `tags`, `status`, `priority`, `list_id`, `parent_id`, `links`) and **not** `rank`, `due_at` or `schedule`. Overwrite an item's `rrule` and the old rule is gone from the database entirely — no revision holds it. `POST /api/items/rerank` writes `rank` with no snapshot at all.
+
+⚠️ **`GET /api/items` and `/api/search` hide held items by default.** Nothing in a default listing tells you so. `include_held=true` reveals them, and held-ness is inherited down `parent_id`. That default is deliberate — a hold is the user parking work behind a gate — so an unattended worker should leave it alone rather than widen its own search with it.
+
+A `workspace` is an agent's durable working memory: a timestamped markdown document a recurring job reads first and rewrites last on every run. It's a distinct type so it can never be mistaken for work to do (it must not pollute the todo queue) nor clutter the notes list. Scheduler agent jobs point at one via `workspace_id`, and the executor injects its location and contract into the prompt automatically. Use `parent_id` to split an overgrown workspace into children with a roll-up left behind, so the memory always stays small enough for a human to read in one sitting.
+
+```bash
+# List items (optionally filter by type/tag/status/list_id)
+curl -s "http://localhost:8191/api/items?type=todo&status=open&limit=100"
+
+# Create a todo
+curl -s -X POST http://localhost:8191/api/items \
+  -H "Content-Type: application/json" \
+  -d '{"type":"todo","title":"Call plumber","tags":["home"],"priority":2}'
+
+# Create a note with markdown body
+curl -s -X POST http://localhost:8191/api/items \
+  -H "Content-Type: application/json" \
+  -d '{"type":"note","title":"Deploy playbook","body":"## Steps\n1. …","tags":["ops"]}'
+
+# Mark a todo done
+curl -s -X PATCH http://localhost:8191/api/items/<id> \
+  -H "Content-Type: application/json" \
+  -d '{"status":"done"}'
+
+# Delete (reversible — stamps deleted_at, leaves status alone)
+curl -s -X DELETE http://localhost:8191/api/items/<id>
+
+# Undo the delete; comes back exactly as it was
+curl -s -X POST http://localhost:8191/api/items/<id>/restore
+
+# Every prior state of an item (update / delete / restore)
+curl -s http://localhost:8191/api/items/<id>/revisions
+
+# Full-text search
+curl -s "http://localhost:8191/api/search?q=plumber&type=todo"
+
+# All unique tags / named lists
+curl -s http://localhost:8191/api/tags
+curl -s http://localhost:8191/api/lists
+
+# Reorder items in a ranked list
+curl -s -X POST http://localhost:8191/api/items/rerank \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"id":"<id1>","rank":1.0},{"id":"<id2>","rank":2.0}]}'
+```
+
+DB: `~/.noteboard/noteboard.db` (SQLite + FTS5). Single source of truth — do NOT reintroduce a filesystem-based notes tree.
+
+### Recurrence (`schedule`) — RFC 5545
+
+Any item can carry a `schedule`: the rule for when it is due and when it nudges. It is available on every item type, not just personal ones — `tag` / `exclude_tag` is what separates personal from coding todos, not the presence of a rule.
+
+`due_at` stays the single source of truth for **when an item is next due**. `schedule` is the rule that *generates* that answer; `dtstart` is the series **anchor** (iCalendar sense), never the current due date.
+
+```bash
+curl -s -X POST http://localhost:8191/api/items \
+  -H "Content-Type: application/json" \
+  -d '{"type":"todo","title":"Water the plants","tags":["personal","home"],
+       "schedule":{
+         "dtstart":"2026-07-21T09:00:00-07:00",
+         "tzid":"America/Los_Angeles",
+         "rrule":"FREQ=MONTHLY;BYDAY=3TU",
+         "mode":"instance",
+         "remind":{"lead":["-P1D"],"channels":["digest","calendar"]}
+       }}'
+
+# Preview when a rule ACTUALLY fires — do this before trusting one.
+curl -s "http://localhost:8191/api/items/<id>/occurrences?from=2026-07-01T00:00:00-07:00&to=2027-01-01T00:00:00-08:00"
+```
+
+- **`rrule`** — any RFC 5545 rule. `FREQ=MONTHLY;BYDAY=3TU` (every 3rd Tuesday), `FREQ=WEEKLY;INTERVAL=2;BYDAY=TH` (every other Thursday), `FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1` (last weekday of the month). End with `;COUNT=n` or `;UNTIL=...`. Use `rdate` for specific one-off dates and `exdate` to skip an occurrence.
+- **`tzid`** — **mandatory** whenever a rule is present, and never defaulted. An offset is not a zone: a rule anchored to `-07:00` cannot know what happens after a DST transition and silently drifts an hour twice a year.
+- **`mode`** — `instance` (default): each occurrence is materialized as a **child todo**, so downstream consumers just see ordinary todos and never need to understand recurrence. `rolling`: one row whose `due_at` advances when completed (no history).
+- **`remind.nag`** — an RRULE that repeats **until the item is done** ("bother me every weekday at 10am"). Independent of the due date in both its rule and its expansion: `rdate` and `exdate` apply to the **due series only**. Fixed 2026-08-13 — `Schedule.expand` used to read those two sets off the schedule and apply them to whichever rule it expanded, nag included, so an item due 2026-08-10 with `nag FREQ=DAILY;COUNT=2` and `rdate ["2026-12-25T09:00-08:00"]` nagged three times, the third straight off the due schedule. They are now parameters passed per series and `NagOccurrences` passes neither, pinned by `TestDueDateOverridesDoNotMoveTheNag`. ⚠️ `reminder-coordinator` links noteboard's `model` package through a `replace` directive, so **the live reminders only change when that binary is rebuilt** — check it was redeployed before trusting this paragraph.
+- **`remind.lead`** — ISO-8601 offsets before due (`-P1D`), calendar-aware.
+- **`remind.channels`** — defaults to `["digest"]`. `calendar` and `herald` are opt-in per item.
+
+A bad rule is rejected at write time — it would otherwise expand to nothing and silently remind no one. Always check `/occurrences` before trusting a rule; `BYDAY=3TU` and `BYDAY=TU;BYSETPOS=3` read alike and diverge in months that start on a Tuesday.
+
+## Reminders — one coordinator, never a new cron job
+
+`~/bin/reminder-coordinator` (scheduler job 32, `*/15`) is the **only** thing that reminds the user of anything. It materializes recurring todos, rewrites the standing **"📆 Today — personal"** note (the primary surface — always current, readable at dash `/notes`), mirrors opted-in items to Google Calendar, and sends **at most one herald session per tick**.
+
+It replaced five jobs that each nudged without knowing what the others had said, so an overdue todo with its own nudge job opened two chat sessions a day.
+
+**Do not add a cron job to nudge about a todo.** That is what recreated the bug. Put the cadence on the todo as `schedule.remind.nag` and the coordinator will deliver it in its single session. Source: `~/repos/scheduler/cmd/reminder-coordinator/`.
+
+## Service Ports
+
+Ports are not hardcoded — always check what ports services are actually running on by inspecting systemd units, config files, or `ss -tlnp`. If there are deployment issues, check all running services for port conflicts or duplicate deployments.
+
+## Tech Stack
+
+- **Primary language**: Go (nearly all backend services)
+- **Frontend**: React 19 + TypeScript + Vite
+- **Messaging**: NATS / JetStream
+- **Databases**: SQLite (most services), PostgreSQL (inber-party)
+- **AI**: Anthropic Claude API (via custom Go SDK)
+- **Media**: Plex, calibre, matterbridge
