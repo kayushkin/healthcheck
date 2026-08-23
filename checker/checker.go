@@ -144,6 +144,12 @@ type Checker struct {
 	// which checks reach it without a real unit being enabled as a side effect;
 	// nil means the real one.
 	enableUnit func(svc ServiceConfig) (string, error)
+
+	// isEnabled reads the unit's enablement state. Substitutable for the same
+	// reason: the only input that reaches the auto-enable decision is a unit
+	// systemd reports "disabled", and a test cannot produce one without either
+	// disabling a real unit or being unable to fail. nil means the real probe.
+	isEnabled func(svc ServiceConfig) string
 }
 
 func New(cfg *Config) *Checker {
@@ -237,7 +243,11 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		checkErr = c.checkHTTP(svc)
 	case "systemd":
 		checkErr = c.checkSystemd(svc)
-		enabledState = systemdIsEnabled(svc)
+		probe := c.isEnabled
+		if probe == nil {
+			probe = systemdIsEnabled
+		}
+		enabledState = probe(svc)
 	case "command":
 		checkErr = c.checkCommand(svc)
 	default:

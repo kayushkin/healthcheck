@@ -42,6 +42,14 @@ func TestAMisconfiguredCheckDoesNotWriteSystemdState(t *testing.T) {
 
 	// And prove checkService consults that decision, not a condition of its own.
 	// Without this, deleting the !misconfigured term leaves the test above green.
+	//
+	// The enablement probe is substituted to report "disabled". That is not
+	// convenience: a unit that does not exist answers "not-found", so a test
+	// built on a phantom alone reaches the enable branch under NO condition and
+	// passes by being unable to fail. Reporting "disabled" against a unit
+	// checkSystemd cannot find is exactly the suffixed-name case, and it is the
+	// only input on which this assertion can discriminate.
+	c.isEnabled = func(ServiceConfig) string { return "disabled" }
 	userManagerReachable(t)
 	for i := 0; i < 3; i++ {
 		c.checkService(svc)
