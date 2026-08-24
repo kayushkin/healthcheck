@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kayushkin/healthcheck/internal/bridgesession"
 )
 
 type ResourceState struct {
@@ -366,7 +368,7 @@ func (c *Checker) spawnCCAgent(res ResourceConfig, state *ResourceState) {
 	}
 
 	sendBody, _ := json.Marshal(map[string]string{"message": prompt})
-	sendResp, err := client.Post(bridgeURL+"/sessions/"+session.SessionID+"/send", "application/json", bytes.NewReader(sendBody))
+	sendResp, err := client.Post(bridgesession.SendMessageURL(bridgeURL, session.SessionID), "application/json", bytes.NewReader(sendBody))
 	if err != nil {
 		log.Printf("CC-AGENT: send message to %s failed: %v", session.SessionID, err)
 		return
