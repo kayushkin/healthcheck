@@ -13,6 +13,7 @@ import (
 
 	"github.com/kayushkin/bus"
 	"github.com/kayushkin/healthcheck/checker"
+	"github.com/kayushkin/healthcheck/internal/bridgesession"
 )
 
 type Alerter struct {
@@ -209,7 +210,7 @@ func (a *Alerter) createEscalationSession(name string, state checker.ResourceSta
 	}
 
 	sendBody, _ := json.Marshal(map[string]string{"message": prompt})
-	sendResp, err := client.Post(a.llmBridgeURL+"/sessions/"+session.SessionID+"/send", "application/json", bytes.NewReader(sendBody))
+	sendResp, err := client.Post(bridgesession.SendMessageURL(a.llmBridgeURL, session.SessionID), "application/json", bytes.NewReader(sendBody))
 	if err != nil {
 		log.Printf("LLMUX-ESCALATION: send message to %s failed: %v", session.SessionID, err)
 		return
