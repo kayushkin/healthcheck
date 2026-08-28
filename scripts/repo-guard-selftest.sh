@@ -509,6 +509,108 @@ check "coverage: nul judges every directory, so its two counts agree" \
       "$(report_field "$ROOT/cov-nul.json" 'str(d["repos_total"]) + " " + str(d["directories_scanned"])')"
 check "coverage: the nul accounting closes" "0" "$(identity "$ROOT/cov-nul.json")"
 
+# ----------------------------------------------------------------- fixture REFS
+# WHICH SOURCE the sweep compiled.
+#
+# `git clone --local` checks out the source repository's currently checked-out
+# branch, so a repo parked on a feature branch is the code this guard builds and
+# calls a clean clone of HEAD. That cost a real two-day miss (llm-bridge-server
+# against llm-bridge, 2026-08-12), and nothing in the report said which ref any
+# clone had resolved to.
+#
+# Four repositories, because the record has to DISCRIMINATE and three of these
+# are the ways a naive version of it goes wrong:
+#
+#   refmain      on its trunk                     -> on_default yes
+#   refbranch    on a branch with its OWN commit   -> on_default no
+#   refsame      on a branch AT the trunk commit   -> on_default yes  <- negative control
+#   refconsumer  replaces ../refbranch             -> the sibling is recorded at all
+#
+# `refsame` is the arm that matters most. Comparing BRANCH NAMES would mark it
+# diverged, and it is not: the commit it builds is the trunk's commit, so there
+# is nothing wrong with that repo and reporting one would be crying wolf. Any
+# rewrite that compares names instead of commits fails here and only here.
+#
+# `refconsumer` pins the other half: a replace-sibling is cloned and installed
+# but never built, so it appears NOWHERE else in the report. If the ref list did
+# not cover siblings it would miss the exact shape that produced the original
+# defect.
+REFS="$ROOT/refs"
+mkdir -p "$REFS"
+# These four have to BUILD, unlike the fixtures above. The section asserts that a
+# diverged clone is recorded and still not failed, and that assertion is worth
+# nothing against repos that were failing anyway for an unrelated reason.
+make_ref_repo() {  # make_ref_repo <dir>
+  make_repo "$1" -
+  printf 'package %s\n' "$(basename "$1")" > "$1/doc.go"
+  git -C "$1" add -A
+  git -C "$1" commit -qm "a package that compiles"
+}
+make_ref_repo "$REFS/refmain"
+make_ref_repo "$REFS/refbranch"
+make_ref_repo "$REFS/refsame"
+make_ref_repo "$REFS/refconsumer"
+
+# refbranch: a feature branch carrying a commit the trunk does not have.
+git -C "$REFS/refbranch" checkout -q -b feature/not-the-trunk
+printf 'package refbranch\n\n// Only on the branch, so the branch commit differs from the trunk commit.\nconst OnlyOnTheBranch = true\n' > "$REFS/refbranch/branch_only.go"
+git -C "$REFS/refbranch" add -A
+git -C "$REFS/refbranch" commit -qm "a commit that exists only on the branch"
+
+# refsame: a feature branch that has not diverged. Same commit as the trunk.
+git -C "$REFS/refsame" checkout -q -b feature/no-divergence
+
+# refconsumer: replaces ../refbranch, so the sweep must provision refbranch as a
+# sibling and record ITS ref too.
+python3 - "$REFS/refconsumer/go.mod" <<'PY'
+import sys
+p = sys.argv[1]
+open(p, "w").write(
+    "module refconsumer\n\ngo 1.22\n\nrequire refbranch v0.0.0\n\nreplace refbranch => ../refbranch\n"
+)
+PY
+git -C "$REFS/refconsumer" add -A
+git -C "$REFS/refconsumer" commit -qm "replace the sibling"
+
+REPOS_DIR="$REFS" REPORT="$ROOT/refs-build.json" bash "$AUDIT" >"$ROOT/refs.out" 2>&1
+
+ref_field() {  # ref_field <repo> <key>
+  report_field "$ROOT/refs-build.json" \
+    "([r for r in d['resolved_refs'] if r['repo'] == '$1'] or [{}])[0].get('$2', 'MISSING')"
+}
+
+check "refs: a repo on its trunk is recorded as on its trunk" \
+      "yes" "$(ref_field refmain on_default)"
+check "refs: a repo on a DIVERGED branch is recorded as off its trunk" \
+      "no" "$(ref_field refbranch on_default)"
+check "refs: the branch NAME that was actually built is recorded, not inferred" \
+      "feature/not-the-trunk" "$(ref_field refbranch branch)"
+# The negative control. A name comparison passes every check above and fails this.
+check "refs: a branch sitting AT the trunk commit is NOT reported as diverged" \
+      "yes" "$(ref_field refsame on_default)"
+check "refs: the trunk it compared against is named, so the verdict can be checked" \
+      "main" "$(ref_field refmain default_branch)"
+# The sibling half: refbranch is provisioned for refconsumer and built for
+# itself, so it must appear exactly ONCE however many consumers reach it.
+check "refs: a replace-sibling is recorded even though nothing ever builds it" \
+      "1" "$(report_field "$ROOT/refs-build.json" 'len([r for r in d["resolved_refs"] if r["repo"] == "refbranch"])')"
+check "refs: the off-trunk count is the number of diverged clones, not of branches" \
+      "1" "$(report_field "$ROOT/refs-build.json" 'd["resolved_off_default"]')"
+check "refs: every repository the sweep materialised has a row" \
+      "refbranch,refconsumer,refmain,refsame" \
+      "$(report_field "$ROOT/refs-build.json" '",".join(sorted(r["repo"] for r in d["resolved_refs"]))')"
+# Recording must not become judging: this fixture has a diverged clone and the
+# sweep must still be free to call the fleet green. Pinning it here is what stops
+# a later pass quietly turning the record into a red guard, which is the decision
+# this change deliberately left to the user.
+check "refs: an off-trunk clone is recorded and NOT failed" \
+      "0" "$(report_field "$ROOT/refs-build.json" 'd["failed"]')"
+# The line a human reads at 03:00 has to carry it too, or the report key is a
+# fact nobody meets when they need it.
+check "refs: the closing summary says the sweep did not build those trunks" \
+      "yes" \
+      "$(case "$(cat "$ROOT/refs.out")" in *"resolved to a NON-DEFAULT branch"*) echo yes ;; *) echo no ;; esac)"
+
 # --only is the fourth route out of the sweep, and it has to be counted for the
 # identity to be an invariant rather than a property of full sweeps only. If it
 # were not, the reader could not tell a filtered sweep from a broken one — it
