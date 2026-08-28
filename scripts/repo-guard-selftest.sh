@@ -762,6 +762,32 @@ check "refs: the closing summary says the sweep did not build those trunks" \
       "yes" \
       "$(case "$(cat "$ROOT/refs.out")" in *"resolved to a NON-DEFAULT branch"*) echo yes ;; *) echo no ;; esac)"
 
+# The reader half. The report key is worth nothing if the one line healthcheck
+# polls every 60s still says "builds from a clean clone of HEAD" unqualified --
+# that sentence is the whole defect. And it must still exit 0: recording is not
+# judging, and an off-trunk clone reddening this reader would be the decision
+# this change deliberately left open.
+refs_status_out=$(REPORT="$ROOT/refs-build.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)
+refs_status_rc=$?
+check "refs: the status reader NAMES the repo whose trunk was not built" \
+      "yes" \
+      "$(case "$refs_status_out" in *"BUILT OFF-TRUNK"*"refbranch"*) echo yes ;; *) echo "no: $refs_status_out" ;; esac)"
+check "refs: an off-trunk clone does not redden the status reader" \
+      "0" "$refs_status_rc"
+# A sweep predating the key must not be reported as a fleet on its trunk: that
+# would invent the measurement this whole change exists to stop inventing.
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("resolved_refs", None)
+d.pop("resolved_off_default", None)
+json.dump(d, open(sys.argv[2], "w"))
+' "$ROOT/refs-build.json" "$ROOT/refs-legacy.json"
+check "refs: a report with no ref provenance says so rather than implying a clean trunk" \
+      "yes" \
+      "$(case "$(REPORT="$ROOT/refs-legacy.json" bash "$HERE/repo-build-audit-status.sh" 2>&1)" in
+           *"ref provenance not recorded"*) echo yes ;; *) echo no ;; esac)"
+
 # --only is the fourth route out of the sweep, and it has to be counted for the
 # identity to be an invariant rather than a property of full sweeps only. If it
 # were not, the reader could not tell a filtered sweep from a broken one — it
