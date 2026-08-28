@@ -225,9 +225,38 @@ if failed:
 # proves the numbers add up; it cannot tell that 71 was 72 last night. Putting
 # both halves on the line a human actually reads is what makes a repo silently
 # leaving the sweep look different from a clean fleet.
+# WHOSE clean clone of HEAD. `git clone --local` checks out the source
+# repository currently checked-out branch, so a repo parked on a feature branch
+# is the code the sweep built. Until this was printed, the sentence above said
+# "builds from a clean clone of HEAD" while meaning "built against whatever was
+# checked out when cron fired", and on 2026-08-28 that was 42 of 82 repos.
+#
+# Reported, never failed. Whether an off-trunk clone should be RED changes what
+# this guard MEANS and is a decision left open on purpose -- an in-flight branch
+# is the normal working state of this box. So this only ever appends to a line
+# that was already going to be printed, and the exit status is untouched.
+#
+# Absent rather than zero when the sweep predates the key: an old report cannot
+# say the fleet was on its trunk, and printing a reassuring zero for it would be
+# inventing the measurement this whole change exists to stop inventing.
+off_default = report.get("resolved_off_default")
+if off_default is None:
+    ref_note = ", ref provenance not recorded by this sweep"
+elif off_default:
+    resolved = report.get("resolved_refs", [])
+    diverged = ", ".join(
+        sorted(r.get("repo", "?") for r in resolved if r.get("on_default") == "no")
+    )
+    ref_note = (
+        f", BUILT OFF-TRUNK: {off_default} of {len(resolved)} clones came from a "
+        f"non-default branch ({diverged})"
+    )
+else:
+    ref_note = ""
+
 print(
     f"ok: {ok}/{total} repos build from a clean clone of HEAD "
     f"({total} of {scanned} directories under the repos root are Go repos, "
-    f"{unguarded} unguarded, checked {age_hours:.1f}h ago)"
+    f"{unguarded} unguarded, checked {age_hours:.1f}h ago{ref_note})"
 )
 '

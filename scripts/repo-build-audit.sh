@@ -23,6 +23,33 @@
 # DEFAULT flags. Anything else re-creates the blind spot this guard exists to
 # close.
 #
+# ⚠️ WHOSE committed HEAD — the one leak the paragraph above does not close
+# ----------------------------------------------------------------------
+# `git clone --local` checks out the SOURCE REPOSITORY'S CURRENTLY CHECKED-OUT
+# BRANCH. Which branch a working tree is parked on is working-tree state, just
+# like the stale artifacts and stray siblings above, and it survives the clone
+# untouched — so the last leak is the one that decides which source code gets
+# compiled. Measured 2026-08-28: 42 of this box's 82 repositories were sitting
+# on a feature branch, and this sweep built those branches.
+#
+# That was invisible until 2026-08-28. It cost a real break: on 2026-08-12
+# llm-bridge-server's `main` stopped compiling against llm-bridge's `main`,
+# and this guard reported it `ok` for two days running because ~/repos/llm-bridge
+# happened to be checked out on the branch that carried the missing field.
+#
+# What this script now does about it is RECORD, not judge: every clone writes
+# its branch, its commit and whether that commit is the source's trunk into
+# `resolved_refs` in the report, and the closing line says so out loud when any
+# clone came off a non-default branch. Nothing is failed for it.
+#
+# Whether an off-trunk clone should be RED is deliberately still open, because
+# it changes what a green here means — pinning siblings to their default branch
+# would turn every legitimate in-flight branch into a red guard, which is the
+# cry-wolf failure this file is careful about everywhere else. Recording it
+# makes a green legible and makes two nights that disagree explainable, which
+# is worth having on its own and is a prerequisite for deciding the rest.
+# See noteboard card 59bb869d-8ce2-47ac-90f7-460784d5ae1e.
+#
 # What it runs, and what it deliberately does not
 # -----------------------------------------------
 #   go build ./...   compiles the package tree
@@ -364,6 +391,10 @@ STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/repo-build-audit}"
 # alike. It lives outside this repository, which is why the absence has a name.
 SCOPE_MODULE="${SCOPE_MODULE:-$HOME/.nightly-shared/compiled_here.py}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d /tmp/repo-build-audit.XXXXXX)}"
+# Where provision() records the ref each clone actually resolved to. It cannot
+# be a shell variable: provision runs inside `$(...)`, so every assignment it
+# makes dies with the subshell. A file survives.
+RESOLVED_REFS_FILE="$WORK_ROOT/resolved-refs.tsv"
 STAGE_TIMEOUT="${STAGE_TIMEOUT:-600}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
 WITH_TESTS=0
@@ -501,6 +532,76 @@ export GOFLAGS=
 export GOWORK=off
 export CGO_ENABLED="${CGO_ENABLED:-1}"
 
+# default_branch_of <repo_dir> — the branch this repository treats as its trunk.
+#
+# Asked of the SOURCE repository, never of the clone: a `git clone --local`
+# creates a local branch only for the ref it checked out, so the clone of a repo
+# parked on a feature branch has no local `main` to compare against at all.
+#
+# Order: what origin says, then the conventional names. If none of them resolve
+# the answer is EMPTY and stays empty — a guessed trunk would make every
+# comparison below silently meaningless, which is the failure this whole change
+# exists to remove.
+default_branch_of() {
+  local src="$1" d candidate
+  d=$(git -C "$src" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  d="${d#origin/}"
+  if [ -z "$d" ]; then
+    for candidate in main master; do
+      if git -C "$src" rev-parse --verify --quiet "refs/heads/$candidate" >/dev/null 2>&1; then
+        d="$candidate"; break
+      fi
+    done
+  fi
+  printf '%s' "$d"
+}
+
+# record_resolved_ref <name> <src> <clone_dir> — write down WHICH SOURCE the
+# clone we are about to build actually holds.
+#
+# `git clone --local` checks out the source repository's currently checked-out
+# branch. That is working-tree state, exactly like the stale artifacts and stray
+# siblings this guard was written to defeat, and it survives the clone untouched
+# — so the one leak left open is the one that decides which source code gets
+# compiled. On 2026-08-28, 42 of this box's 82 repositories were parked on a
+# feature branch.
+#
+# This records; it does not judge. A repo built from a feature branch is not
+# failed here, because whether that should be red is a question about what the
+# guard MEANS and it belongs to whoever owns the guard. What was never available
+# before is the fact itself: a green said "this repo builds from its committed
+# source" while meaning "this repo built against whatever was checked out at
+# 03:00", and two runs a night apart could disagree with no commit in between.
+#
+# on_default compares COMMITS, not branch names. A feature branch sitting at the
+# same commit as the trunk compiled the trunk's code, and calling that a
+# divergence would cry wolf on a repo where nothing is wrong.
+record_resolved_ref() {
+  local name="$1" src="$2" clone="$3"
+  local branch commit default_branch default_commit on_default
+  branch=$(git -C "$clone" branch --show-current 2>/dev/null)
+  commit=$(git -C "$clone" rev-parse HEAD 2>/dev/null)
+  default_branch=$(default_branch_of "$src")
+  if [ -n "$default_branch" ]; then
+    default_commit=$(git -C "$src" rev-parse --verify --quiet "refs/heads/$default_branch" 2>/dev/null)
+  else
+    default_commit=""
+  fi
+  # Three states, and the third is not the second. "unknown" means this script
+  # could not find a trunk to compare against, which is a gap in the RECORD;
+  # reporting it as "no" would claim a divergence nobody measured.
+  if [ -z "$default_commit" ] || [ -z "$commit" ]; then
+    on_default="unknown"
+  elif [ "$commit" = "$default_commit" ]; then
+    on_default="yes"
+  else
+    on_default="no"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$branch" "$commit" "$default_branch" "$default_commit" "$on_default" \
+    >> "$RESOLVED_REFS_FILE"
+}
+
 # provision <name> <dest_parent> — materialise a repo at its committed HEAD.
 # Prints "clone" if it came from a commit, "copy" if the repo is not under git
 # and we had to fall back to its working tree (a weaker guarantee — the caller
@@ -517,11 +618,17 @@ provision() {
   [ -d "$src" ] || { echo "missing"; return 1; }
   if git -C "$src" rev-parse --git-dir >/dev/null 2>&1; then
     git clone --quiet --local "$src" "$parent/$name" >/dev/null 2>&1 || { echo "clone-failed"; return 1; }
+    record_resolved_ref "$name" "$src" "$parent/$name"
     echo "clone"
   else
     # Not a git repo (e.g. tool-store) — there is no committed HEAD to clone.
     cp -a "$src" "$parent/$name" || { echo "copy-failed"; return 1; }
     rm -rf "$parent/$name/node_modules"
+    # Recorded too, so the ref list accounts for every repo this sweep
+    # materialised rather than only the ones it could name a ref for. A distinct
+    # value, because "there is no commit anywhere" is a different fact from
+    # "there is a commit and no trunk to compare it to".
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "" "" "" "" "no-commit" >> "$RESOLVED_REFS_FILE"
     echo "copy"
   fi
 }
@@ -1686,6 +1793,7 @@ printf '%s\n' "${results[@]}" |
   SCAN_TESTS_PASSED="$scan_tests_passed" \
   FILES_SCANNED="$files_scanned" \
   GENERATED_WITH_NUL="$(printf '%s\n' ${generated_with_nul+"${generated_with_nul[@]}"})" \
+  RESOLVED_REFS="$(cat "$RESOLVED_REFS_FILE" 2>/dev/null)" \
   REPORT="$REPORT" \
   python3 -c '
 import json, os, sys
@@ -1727,6 +1835,65 @@ report = {
         )
     ],
 }
+# WHICH SOURCE was compiled. `git clone --local` checks out the source
+# repository s currently checked-out branch, so a repo or a replace-sibling
+# parked on a feature branch is what this sweep built -- and until this list
+# existed, nothing in the report said so. A green read as "builds from its
+# committed source" while meaning "built against whatever was checked out when
+# cron fired".
+#
+# One row per repository this sweep MATERIALISED, which is a larger set than
+# `results`: it includes every relative-replace sibling, and a sibling is cloned
+# and installed but never built, so it appears nowhere else in this report.
+#
+# Recorded, not judged. Nothing here changes a status, and `off_default` is a
+# count and not a failure -- an in-flight branch is the normal working state of
+# this box, and reddening on it is a different guard with a different meaning.
+# (No apostrophes in this block: it is embedded in a single-quoted shell string,
+# and a nested quote silently ends it.)
+#
+# One repository can be provisioned SEVERAL times in a sweep: each repo gets its
+# own workspace, so a shared replace-sibling is cloned once per consumer, and a
+# repo that is also somebody s sibling is cloned as itself as well. Identical
+# rows are therefore expected and are collapsed -- the same source at the same
+# commit is one fact, not six.
+#
+# Rows for one repo that DISAGREE are kept, all of them, and that is deliberate.
+# It can only happen if the source repository moved between two clones in the
+# same sweep -- somebody switched branches while the guard was running -- which
+# means different parts of one report were built against different source, and
+# is the sharpest possible form of the very problem this list exists to expose.
+# Collapsing on the name alone would hide it and pick a winner at random.
+seen = set()
+resolved_refs = []
+for line in os.environ.get("RESOLVED_REFS", "").splitlines():
+    if not line.strip():
+        continue
+    name, branch, commit, default_branch, default_commit, on_default = line.split("\t")
+    row = (name, branch, commit, default_branch, default_commit, on_default)
+    if row in seen:
+        continue
+    seen.add(row)
+    resolved_refs.append({
+        "repo": name,
+        "branch": branch,
+        "commit": commit,
+        "default_branch": default_branch,
+        "default_commit": default_commit,
+        # yes / no / unknown / no-commit. `unknown` means no trunk was found to
+        # compare against, `no-commit` means the source is not a git repository
+        # and was copied from its working tree. Neither is a divergence.
+        "on_default": on_default,
+    })
+resolved_refs.sort(key=lambda r: (r["repo"], r["commit"]))
+report["resolved_refs"] = resolved_refs
+report["resolved_off_default"] = sum(1 for r in resolved_refs if r["on_default"] == "no")
+# Named separately from the count so a reader can tell a sweep that measured
+# divergence from one that could not measure it. A run where this is large is a
+# run whose off_default count means less than it looks.
+report["resolved_ref_unknown"] = [
+    r["repo"] for r in resolved_refs if r["on_default"] in ("unknown", "no-commit")
+]
 if mode != "node":
     # Coverage accounting. `repos_total` is what survived the filters; this says
     # what the filters removed, so the two can be reconciled instead of trusted.
@@ -1852,10 +2019,23 @@ with open(os.environ["REPORT"], "w") as fh:
 '
 
 echo
+# The one line a human reads at 03:00 has to carry this, or the report key is a
+# fact nobody meets at the moment they need it. Printed only when it is non-zero:
+# a fleet entirely on its trunk has nothing to qualify, and a caveat that fires
+# on every run is one people learn to read past.
+# `sort -u`, matching the report's collapse exactly. Counting the raw lines would
+# print a number larger than the report's for the same sweep — a shared sibling
+# is cloned once per consumer — and two numbers for one fact is how a reader
+# learns to trust neither.
+off_default=$(sort -u "$RESOLVED_REFS_FILE" 2>/dev/null | awk -F'\t' '$6 == "no"' | wc -l | tr -d ' ')
+resolved_total=$(sort -u "$RESOLVED_REFS_FILE" 2>/dev/null | wc -l | tr -d ' ')
+ref_caveat=""
+[ "${off_default:-0}" -gt 0 ] && ref_caveat=" — ⚠️ $off_default of $resolved_total clones resolved to a NON-DEFAULT branch (see resolved_refs in the report): this sweep did not build those repos' trunks"
+
 if [ "$MODE" = "smoke" ]; then
-  echo "$ok/$total binaries boot and answer from a clean clone of HEAD; $failed failing, $no_smoke with no smoke to run ($(( finished_epoch - start_epoch ))s)"
+  echo "$ok/$total binaries boot and answer from a clean clone of HEAD; $failed failing, $no_smoke with no smoke to run ($(( finished_epoch - start_epoch ))s)${ref_caveat}"
 elif [ "$MODE" = "node" ]; then
-  echo "$ok/$total node packages install, build and pass their declared checks from a clean clone of HEAD; $failed failing, $unguarded unguarded, ${#without_check[@]} declaring no check script ($(( finished_epoch - start_epoch ))s)"
+  echo "$ok/$total node packages install, build and pass their declared checks from a clean clone of HEAD; $failed failing, $unguarded unguarded, ${#without_check[@]} declaring no check script ($(( finished_epoch - start_epoch ))s)${ref_caveat}"
 elif [ "$MODE" = "elf" ]; then
   echo "$ok/$total repos carry no committed ELF binary at HEAD; $failed with committed binaries, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "settings" ]; then
@@ -1863,7 +2043,7 @@ elif [ "$MODE" = "settings" ]; then
 elif [ "$MODE" = "nul" ]; then
   echo "$ok/$total repos carry no raw NUL byte in committed source at HEAD; $failed with a NUL, $unguarded unguarded, $files_scanned source files read, ${#generated_with_nul[@]} generated blob(s) named but not failed ($(( finished_epoch - start_epoch ))s)"
 else
-  echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+  echo "$ok/$total build from a clean clone of HEAD; $failed failing, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)${ref_caveat}"
 fi
 echo "report: $REPORT"
 
