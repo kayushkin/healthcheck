@@ -214,12 +214,17 @@ if off_default is None:
     ref_note = ", ref provenance not recorded by this sweep"
 elif off_default:
     resolved = report.get("resolved_refs", [])
-    diverged = ", ".join(
-        sorted(r.get("repo", "?") for r in resolved if r.get("on_default") == "no")
-    )
+    diverged = sorted(r.get("repo", "?") for r in resolved if r.get("on_default") == "no")
+    # Named, but capped: this line is polled every 60s and displayed, and on
+    # 2026-08-28 the honest list was 42 repositories and about 900 characters,
+    # which is a line nobody reads at all. The cap SAYS how many it dropped and
+    # where the rest are -- a truncation that hides its own existence is the
+    # failure this guard family refuses everywhere else.
+    shown, rest = diverged[:5], len(diverged) - 5
+    named = ", ".join(shown) + (f", and {rest} more" if rest > 0 else "")
     ref_note = (
         f", BUILT OFF-TRUNK: {off_default} of {len(resolved)} clones came from a "
-        f"non-default branch ({diverged})"
+        f"non-default branch ({named} — full list in resolved_refs)"
     )
 else:
     ref_note = ""
