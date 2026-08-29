@@ -564,6 +564,58 @@ run_stage() {  # run_stage <dir> <stage...> ; captures output into STAGE_OUT
   return $?
 }
 
+# repo_go_tags <dir> — which build tags does this repository declare it needs?
+#
+# Some repositories here do not compile to a working binary under a bare
+# `go build`. job-store and quote-store both link mattn/go-sqlite3 and both
+# create FTS5 virtual tables; in that driver FTS5 is an opt-in cgo feature, so
+# without `-tags sqlite_fts5` the tree builds clean, vets clean, and then every
+# test that opens a store dies at run time with "no such module: fts5".
+#
+# That is why this guard could not see it. `go build` and `go vet` are BOTH
+# green for those repos untagged — measured, not assumed — because the tag
+# changes a linked C library's capability rather than which files compile. No
+# file is excluded, so there is nothing for a file-set check to notice.
+#
+# The tag is read from the repo's own Makefile rather than from a list kept
+# here. The repository is the single source of truth for how it must be built:
+# a list in this script would be a second copy that goes stale the first time a
+# repo adds a tag, and it would silently build the wrong thing rather than say
+# so. Both affected repos already declare `GO_TAGS := sqlite_fts5`, and they
+# are the only two repos in the fleet that declare GO_TAGS at all.
+#
+# Deliberately NOT evaluated with `make`: running a Makefile from the guard
+# would execute whatever that repo's file happens to do. This reads the literal
+# assignment only, and REFUSES a value it cannot read literally rather than
+# guessing at it — a wrong tag builds the wrong thing and still reports green,
+# which is the failure this whole function exists to remove.
+#
+# It sets two globals rather than printing, because the caller needs BOTH
+# answers, and a command substitution would run this in a subshell where the
+# second one dies unread. `$(repo_go_tags ...)` is exactly the shape that loses
+# a refusal — written that way first, and `set -u` is what caught it.
+#
+#   REPO_GO_TAGS         the tags to build with, empty for the normal case
+#   GO_TAGS_UNREADABLE   the raw value, when it is declared but not literal
+repo_go_tags() {  # repo_go_tags <dir>
+  local dir="$1" line value
+  REPO_GO_TAGS=""
+  GO_TAGS_UNREADABLE=""
+  [ -f "$dir/Makefile" ] || return 0
+  line=$(grep -m1 -E '^[[:space:]]*GO_TAGS[[:space:]]*[:?]?=' "$dir/Makefile") || return 0
+  value=${line#*=}
+  value=$(printf '%s' "$value" | sed 's/#.*$//' | xargs)   # strip comment + trim
+  [ -n "$value" ] || return 0
+  # A value naming a make variable, a shell expansion or a command cannot be
+  # read literally. Say so; do not pass a half-expanded string to the compiler.
+  case "$value" in
+    *'$('*|*'${'*|*'`'*)
+      GO_TAGS_UNREADABLE="$value"
+      return 0 ;;
+  esac
+  REPO_GO_TAGS="$value"
+}
+
 # The go caches live under the real HOME. Resolve them ONCE, before any smoke
 # runs, so that redirecting HOME below cannot make every smoke re-download the
 # whole module graph from the network — which would turn a nightly guard into a
@@ -1513,6 +1565,25 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   outdir="$ws/.build-out"
   mkdir -p "$outdir"
 
+  # Build this repo the way the repo says it must be built. An empty result is
+  # the normal case and means a bare `go build` is right for it.
+  repo_go_tags "$ws/$name"
+  repo_tags="$REPO_GO_TAGS"
+  tagflag=()
+  [ -n "$repo_tags" ] && tagflag=(-tags "$repo_tags")
+  if [ -n "$GO_TAGS_UNREADABLE" ]; then
+    # Refuse rather than guess. A tag we half-read builds something other than
+    # what the repo asked for, and still reports green.
+    status="fail"; stage="tags"
+    detail="Makefile declares GO_TAGS=$GO_TAGS_UNREADABLE, which this guard cannot read literally"
+    secs=$(( $(date +%s) - repo_start ))
+    failed=$((failed + 1))
+    echo "FAIL      $name — tags: $detail"
+    results+=("$name	fail	tags	$secs	$detail")
+    rm -rf "$ws"
+    continue
+  fi
+
   stages=(build vet)
   [ "$WITH_TESTS" -eq 1 ] && stages+=(test)
   for s in "${stages[@]}"; do
@@ -1521,12 +1592,12 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
       # plain `go build`, which surfaces the real dependency error rather than hiding
       # it behind "no main packages".
       if (cd "$ws/$name" && go list -f '{{.Name}}' ./... 2>/dev/null | grep -qx main); then
-        run_stage "$ws/$name" go build -o "$outdir/" ./...
+        run_stage "$ws/$name" go build "${tagflag[@]}" -o "$outdir/" ./...
       else
-        run_stage "$ws/$name" go build ./...
+        run_stage "$ws/$name" go build "${tagflag[@]}" ./...
       fi
     else
-      run_stage "$ws/$name" go "$s" ./...
+      run_stage "$ws/$name" go "$s" "${tagflag[@]}" ./...
     fi
     # Capture rc directly. Reading $? inside `if ! run_stage ...; then` yields the
     # status of the negation (always 0), so the timeout branch below could never fire.
@@ -1580,7 +1651,11 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   if [ "$status" = "ok" ]; then
     ok=$((ok + 1))
     [ -n "$degraded" ] && detail="verified against working-tree copies of: $degraded"
-    echo "OK        $name (${secs}s)${degraded:+  [degraded: $degraded]}"
+    # State the scope with the green. A pass built with tags is a different
+    # measurement from a bare one, and a reader cannot tell them apart after
+    # the fact unless the row says which was run.
+    [ -n "$repo_tags" ] && detail="${detail:+$detail; }built with -tags $repo_tags"
+    echo "OK        $name (${secs}s)${degraded:+  [degraded: $degraded]}${repo_tags:+  [-tags $repo_tags]}"
   else
     failed=$((failed + 1))
     echo "FAIL      $name — go $stage: $detail"
