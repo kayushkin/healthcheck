@@ -118,6 +118,48 @@ if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
 print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 '''
 
+# Conforming in every respect the audit probes for, and its arm RAISES instead of
+# grading. This is card `43a460d2`'s measured shape: 11 of the 20 shared scorers answer
+# a harness-break probe with an uncaught traceback. The instrument under the arm is not
+# broken in any way a case could see — the arm simply never reached a case — so the only
+# honest verdict is the third one. The exit code says 1, which is also what a catch says.
+SABOTAGE_CRASHES = '''\
+import sys
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+ARMS = ["breaks-the-predicate"]
+if "--list-sabotages" in sys.argv:
+    print("\\n".join(ARMS)); sys.exit(0)
+if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
+    if sys.argv[2] not in ARMS:
+        print("unknown sabotage %r" % sys.argv[2]); sys.exit(2)
+    raise KeyError("harness break: the arm never reached a case")
+print("CLEAN: 2/2 rows as expected"); sys.exit(0)
+'''
+
+# Crashes on ANY --sabotage, including the nonsense arm the capability probe sends. The
+# old probe read that non-zero exit as the clean refusal it was hoping for, declared the
+# set conforming, listed its arms and ran them — and each of those crashed too and was
+# graded a catch. One break, counted as capability and then as evidence.
+CRASHES_ON_THE_CAPABILITY_PROBE = '''\
+import sys
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+if "--list-sabotages" in sys.argv:
+    print("breaks-the-predicate"); sys.exit(0)
+if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
+    raise RuntimeError("harness break: the arm dispatcher is broken")
+print("CLEAN: 2/2 rows as expected"); sys.exit(0)
+'''
+
+# A clean arm that crashes rather than reporting a red run. Already a finding before this
+# repair, but the finding said `exit 1` and nothing else — the same words a control set
+# that ran and honestly went red produces, so the reader could not tell them apart.
+CLEAN_ARM_CRASHES = '''\
+import sys
+raise ValueError("harness break: the clean arm never started")
+'''
+
 # A red clean arm. Whatever its sabotages then do cannot be read.
 CLEAN_ARM_RED = '''\
 import sys
@@ -238,6 +280,59 @@ def case_catching_no_rows_is_a_finding(work):
                          control_sets=[("alpha", SABOTAGE_CAUGHT_NOTHING)])
     result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
     return bool(findings_matching(result, "reddened no rows")), \
+        f"findings={result['findings']}"
+
+
+def case_a_crashed_arm_is_not_a_catch(work):
+    """The card's headline: a traceback exits non-zero, and non-zero reads as caught.
+
+    Reproduced against the unrepaired audit before this case existed — it printed
+    `GREEN: 2 arm(s)`, zero findings, and stamped the arm `caught by the exit code`
+    while the last line of its output was a `KeyError`.
+    """
+    root = build_fixture(os.path.join(work, "armcrash"),
+                         modules=["alpha"],
+                         control_sets=[("alpha", SABOTAGE_CRASHES)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    arm = result["control_sets"][0]["arms"][1]
+    return (arm.get("verdict") == "harness-break"
+            and bool(findings_matching(result, "crashed instead of grading"))), \
+        f"verdict={arm.get('verdict')} findings={result['findings']}"
+
+
+def case_a_crashed_arm_names_what_broke(work):
+    """A finding that does not say what broke sends the reader back to rerun the arm."""
+    root = build_fixture(os.path.join(work, "armcrashwhat"),
+                         modules=["alpha"],
+                         control_sets=[("alpha", SABOTAGE_CRASHES)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    return bool(findings_matching(result, "the arm never reached a case")), \
+        f"findings={result['findings']}"
+
+
+def case_a_crash_on_the_capability_probe_is_a_finding(work):
+    """A set that crashes on the nonsense arm is unknown, not conforming.
+
+    The sharpest form of the same defect: the probe and the verdict read one channel,
+    so a single break was counted first as the capability and then as the evidence.
+    """
+    root = build_fixture(os.path.join(work, "probecrash"),
+                         modules=["alpha"],
+                         control_sets=[("alpha", CRASHES_ON_THE_CAPABILITY_PROBE)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    record = result["control_sets"][0]
+    return (record["sabotages_run"] is False
+            and bool(findings_matching(result, "capability probe"))), \
+        f"sabotages_run={record.get('sabotages_run')} findings={result['findings']}"
+
+
+def case_a_crashed_clean_arm_says_it_crashed(work):
+    """`exit 1` alone cannot separate an honest red run from a control set that died."""
+    root = build_fixture(os.path.join(work, "cleancrash"),
+                         modules=["alpha"],
+                         control_sets=[("alpha", CLEAN_ARM_CRASHES)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
+    return bool(findings_matching(result, "clean arm crashed instead of running")), \
         f"findings={result['findings']}"
 
 
@@ -515,6 +610,11 @@ CASES = [
     ("an absent go toolchain refuses the audit", case_absent_go_toolchain_refuses_the_audit),
     ("mise's shims supply the toolchain", case_shim_directory_supplies_the_toolchain),
     ("a finding makes main exit 1", case_findings_make_main_exit_one),
+    ("a crashed sabotage arm is not a catch", case_a_crashed_arm_is_not_a_catch),
+    ("a crashed arm's finding names what broke", case_a_crashed_arm_names_what_broke),
+    ("a crash on the capability probe is a finding",
+     case_a_crash_on_the_capability_probe_is_a_finding),
+    ("a crashed clean arm says it crashed", case_a_crashed_clean_arm_says_it_crashed),
 ]
 
 
@@ -529,7 +629,8 @@ def _sabotage_read_only_the_exit_code():
 
 def _sabotage_assume_the_sabotage_flag():
     """Skip the capability probe. A flag-ignoring control set then looks conforming."""
-    audit_module.honours_sabotage_flag = lambda path: True
+    audit_module.probe_sabotage_flag = lambda path: {"honoured": True,
+                                                    "harness_break": None}
 
 
 def _sabotage_trust_the_arm_list():
@@ -618,6 +719,37 @@ def _sabotage_a_missing_toolchain_is_someone_elses_problem():
     audit_module.ensure_go_toolchain_on_path = lambda: None
 
 
+def _sabotage_a_traceback_is_a_verdict():
+    """Stop reading the output for a crash. The exit code then answers for it.
+
+    ⚠️ Neutralised, not deleted. Returning None here leaves `read_sabotage_verdict`
+    reaching its exit-code branch exactly as it did before the repair, which is the
+    defect. Deleting the function instead would raise `NameError` at three call sites
+    and redden every case — the arm would come back CAUGHT while testing nothing, which
+    is the trap card `cd03d6f3` measured on the mutation side.
+    """
+    audit_module.harness_break_line = lambda output: None
+
+
+def _sabotage_the_capability_probe_swallows_a_crash():
+    """Let a crashing control set count as one that honours `--sabotage`.
+
+    Narrower than the arm above: only the probe stops seeing the break, so the set is
+    declared conforming and its arms are listed and run. `read_sabotage_verdict` still
+    sees each arm crash, so this arm must be caught by the probe case specifically —
+    which is the point, since the two channels are separately reachable.
+    """
+    real = audit_module.probe_sabotage_flag
+
+    def swallows(path):
+        answer = real(path)
+        if answer["harness_break"]:
+            return {"honoured": True, "harness_break": None}
+        return answer
+
+    audit_module.probe_sabotage_flag = swallows
+
+
 SABOTAGES = {
     "a-missing-toolchain-is-someone-elses-problem":
         _sabotage_a_missing_toolchain_is_someone_elses_problem,
@@ -629,6 +761,9 @@ SABOTAGES = {
     "an-unreadable-verdict-passes": _sabotage_an_unreadable_verdict_passes,
     "coverage-is-never-checked": _sabotage_coverage_is_never_checked,
     "an-absent-root-is-green": _sabotage_an_absent_root_is_green,
+    "a-traceback-is-a-verdict": _sabotage_a_traceback_is_a_verdict,
+    "the-capability-probe-swallows-a-crash":
+        _sabotage_the_capability_probe_swallows_a_crash,
 }
 
 
