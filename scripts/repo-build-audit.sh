@@ -74,7 +74,9 @@
 #                    gitignored and which nothing in the committed tree builds.
 #                    The single red of 2026-08-08, still red.
 #     logstack       TestGroupOmitsRowsUnlessRequested, the aged-out fixture above.
-#                    Red on main since 2026-08-11.
+#                    Red on main since 2026-08-11. A repair exists on unmerged
+#                    branches and not on main — noteboard todo
+#                    97c448d9-1a96-415f-937a-517aa4f4baeb.
 #
 #   This guard's own flags, not the repo's fault
 #     job-store      Both suites need `-tags sqlite_fts5` and say so in the failure
@@ -83,6 +85,15 @@
 #                    clone of HEAD once the tag is passed — measured 2026-08-31 at
 #                    job-store 5bf43c3 and quote-store 5d0491c. Reading these two as
 #                    broken trees is the mistake this paragraph exists to stop.
+#                    Whether this sweep should honour a repo's declared tags is an
+#                    open decision, not an oversight: noteboard todo
+#                    31d3f545-2f47-4d87-ae81-fe9388880f23 states it, and this file
+#                    already argues BOTH sides of it — "build with DEFAULT flags"
+#                    above against "the repo's own build script is the contract"
+#                    in the --node section below. Note
+#                    232c36c3-b44d-42cf-b60b-0e7c431e1875 has the population: six
+#                    repos here create FTS5 tables and the split is exactly the
+#                    driver, cgo mattn/go-sqlite3 against pure-Go modernc.org.
 #
 # So "fix one repo and the cost of `stages+=(test)` by default is zero red repos" no
 # longer holds. As measured 2026-08-31 the cost is two repos to repair plus a way for
