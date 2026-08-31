@@ -35,28 +35,30 @@
 # live services or credentials, so gating on them would make the guard cry wolf
 # nightly". That claim was never measured, and on 2026-08-08 it was, by running
 # this guard with --with-tests across the whole fleet. It is FALSE, and it is
-# still false:
+# still false — but the count moves, so the count is dated:
 #
-#   Not one suite needs a live service or a credential. Every candidate turned
-#   out to be a t.Skip on the unset env var (inber/agent, inber/conversation), a
-#   //go:build integration tag that `go test ./...` never selects at all
-#   (llm-bridge-hermes), an httptest fake, a port number asserted as a string
-#   literal (forge, permission-store, redact), or a test written to tolerate the
-#   service being absent (inber/server TestEventPublisherCreation).
+#   2026-08-08   70 of 71 repos pass `go test ./...` from a clean clone of HEAD (430s)
+#   2026-08-31   71 of 75 repos pass `go test ./...` from a clean clone of HEAD (378s)
 #
-# ⚠️ But the COUNT that used to sit here — "70 of 71 repos pass, 430s, the single
-# red is argraphments" — was written undated, and it decayed in three days. Two
-# reds it does not mention arrived after it was taken. Re-measured:
+# ⚠️ Date the number and re-take it before quoting it. The 2026-08-08 line stood
+# for three weeks and went stale while every tree it described stood still: nobody
+# committed anything, but logstack's seedCorpus fixture is anchored to a wall-clock
+# date and its corpus left the query window on 2026-08-11. A green repo turned red
+# on its own, and in the direction that made this comment look safer than it was.
 #
-#   2026-08-08:  70 of 71 pass `go test ./...` from a clean clone of HEAD (430s)
-#   2026-08-14:  68 of 72 pass `go test ./...` from a clean clone of HEAD (531s,
-#                go1.26.0). Red: argraphments, job-store, logstack, and one flake.
+# Not one suite needs a live service or a credential. That half of the 2026-08-08
+# finding still holds — re-run 2026-08-31, no repo failed for a missing service.
+# Every candidate turned out to be a t.Skip on the unset env var (inber/agent,
+# inber/conversation), a //go:build integration tag that `go test ./...` never
+# selects at all (llm-bridge-hermes), an httptest fake, a port number asserted as a
+# string literal (forge, permission-store, redact), or a test written to tolerate
+# the service being absent (inber/server TestEventPublisherCreation).
 #
 # ⚠️ The `llm-bridge-hermes` entry in the list of candidates above needs
 # re-reading, and the 360th pass corrected it here rather than leave it
 # standing. It is true that the tag is never selected, and it is NOT a reason
-# the suite is safe to gate on:
-# it means those tests have never run. Measured 2026-08-22 over all 73 Go
+# the suite is safe to gate on: it means those tests have never run. Measured
+# 2026-08-22 over all 73 Go
 # repositories under the root -- two hold test files a default run omits,
 # llm-bridge-hermes (12 entry points behind `integration`) and llm-bridge-server
 # (4 behind three tags) -- and when the 355th pass executed the four gated files
@@ -64,47 +66,28 @@
 # So a green from this stage is a claim about the files it compiled. That is why
 # --with-tests now records a scope line per repo; see repo_scope below.
 #
-# Put the date IN the sentence. A fleet number is a measurement, not a fact, and
-# an undated one goes on being quoted long after it stops being true.
+# The four reds of 2026-08-31 are two different things, and only the first pair is
+# a broken tree:
 #
-# The four reds are four DIFFERENT things, and only the first is a plain defect:
+#   A repo that does not pass its own tests
+#     argraphments   three tests assert on static/dist/index.html, which is
+#                    gitignored and which nothing in the committed tree builds.
+#                    The single red of 2026-08-08, still red.
+#     logstack       TestGroupOmitsRowsUnlessRequested, the aged-out fixture above.
+#                    Red on main since 2026-08-11.
 #
-#   argraphments — a TRUE defect, unchanged since 2026-08-08. Three tests assert
-#   on static/dist/index.html, which is gitignored and which nothing in the
-#   committed tree builds. See noteboard for the measurement and the fork.
+#   This guard's own flags, not the repo's fault
+#     job-store      Both suites need `-tags sqlite_fts5` and say so in the failure
+#     quote-store    message. The stages below pass no build tags, so `go test ./...`
+#                    cannot open a database in either. Both are GREEN from a clean
+#                    clone of HEAD once the tag is passed — measured 2026-08-31 at
+#                    job-store 5bf43c3 and quote-store 5d0491c. Reading these two as
+#                    broken trees is the mistake this paragraph exists to stop.
 #
-#   job-store — a WOLF, and a kind the sentence above never contemplated. Its
-#   suite needs neither a service nor a credential; it needs a BUILD TAG. The
-#   repo says so in its README, Makefile, deploy.sh and smoke ("go test -tags
-#   sqlite_fts5 ./..."), and it is green that way from a clean clone — verified.
-#   This guard builds with DEFAULT flags on purpose, so it runs the one
-#   invocation the repo documents as wrong. The 2026-08-08 refutation disposed of
-#   a specific WORDING (services, credentials); the general objection it was
-#   standing in for — some suites cannot pass the plain invocation — survived it
-#   and now has an instance.
-#
-#   logstack — red with NO COMMIT. Nothing in that repo changed; seedCorpus
-#   stamped its fixture 2026-07-12 and the fixture aged out of a query window
-#   read off time.Now() on 2026-08-11. This is the strongest argument FOR the
-#   gate on this page: the class of defect `go test` catches and `go vet` cannot
-#   includes ones that arrive on a DATE rather than in a diff, which is invisible
-#   to every guard that reruns on change. (Fixed on an unmerged branch, so a
-#   clean clone of HEAD — main or the checked-out branch — is still red.)
-#
-#   llm-bridge-server — a FLAKE. Red in the full sweep at 237s, green on re-run
-#   through this same code path at 140s and green 4-for-4 uncached in isolation.
-#   Load-sensitive, and the full sweep was sharing the box. It is recorded here
-#   because a single measurement CANNOT SEE flakiness at all: run the fleet once
-#   and a flaky suite is indistinguishable from a broken one, which is the whole
-#   cry-wolf question this comment keeps trying to answer with one number.
-#
-# So the exclusion still rests on ONE honest reason: turning this on would paint
-# the guard red, and a guard everyone has learned to ignore is worse than no
-# guard at all. But the old closing line — "fix that repo and the cost is, as
-# measured, zero red repos" — is FALSE as measured today. Fixing argraphments
-# alone leaves job-store (which wants a decision about tags, not a fix) and
-# logstack (which wants a merge). Anyone turning this on should re-measure
-# first and expect the number to have moved again.
+# So "fix one repo and the cost of `stages+=(test)` by default is zero red repos" no
+# longer holds. As measured 2026-08-31 the cost is two repos to repair plus a way for
+# this script to learn a repo's build tags, which it has no notion of today. Whether
+# to turn `test` on by default is the user's call and this comment does not make it.
 #
 # Tier 2: --smoke
 # ---------------
@@ -385,7 +368,12 @@ while [ $# -gt 0 ]; do
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
-      sed -n '2,60p' "$0"; exit 0 ;;
+      # Print the header comment down to the line before the "Tier 2" section.
+      # Found rather than counted: the rationale above carries a dated measurement
+      # that gets rewritten whenever the sweep is re-taken, and a fixed line range
+      # starts cutting mid-sentence the first time that block grows. The old
+      # `2,60p` already did — it stopped four lines into Tier 2, mid-sentence.
+      awk 'NR==1 {next} /^# Tier 2: --smoke$/ {exit} {print}' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
