@@ -34,6 +34,22 @@ A cheap check nobody runs is not cheaper than an expensive one; it is worth noth
    the list that has since gained one — the baseline is then a lie, and a lying
    baseline is exactly the silent rot this family of cards is about.
 
+5. **Which of the root's files are control sets at all**, and this is decided by what
+   a file *declares*, not by what it is called. A control set here declares the table
+   of arms it can be asked to run — `SABOTAGES`, `ARMS`, `CASES`, `NEGATIVE_CONTROLS`
+   or `CONTROL_ARMS` — and `discover` reads that off the ast without importing
+   anything. Until 2026-08-31 it read the `_selftest` suffix instead, and card
+   `da86b1ab` measured what that costs: a control set spelled otherwise is not
+   recognised, so **none of its arms is ever run**, and it is then counted as a module
+   needing a guard of its own. One spelling, two wrong answers, and the docstring above
+   is the argument against the first of them — a cheap check nobody runs is worth
+   nothing. Latent at 0 of 25 the day it was found, because every control set in the
+   root is spelled `<module>_selftest.py`; it fires on the next promotion that is not.
+   The suffix still answers the *other* question — which module a control set guards —
+   because nothing structural does. `UNSUFFIXED_CONTROL_SETS` carries that answer where
+   the name cannot, and a recognised control set with neither runs its arms and is
+   reported as covering nothing, rather than being quietly attributed to a guess.
+
 ## ⛔ The exit code does not carry the verdict, and it differs per control set
 
 Measured 2026-08-22 over the four control sets on this box, and it is the reason this
@@ -105,11 +121,16 @@ script's own control set is unsound. Exit 2 = the audit could not be carried out
 (the root is missing) — kept apart from exit 1 so a caller cannot read "could not run"
 as "ran and found nothing".
 
-Pinned by `scripts/nightly-shared-control-set-audit-selftest.py`: 19 cases and 7
-sabotage arms, all caught, measured 2026-08-22.
+Pinned by `scripts/nightly-shared-control-set-audit-selftest.py`: 34 cases and 15
+sabotage arms, all caught, measured 2026-08-31. (The count read "19 cases and 7
+sabotage arms" until then, and had been wrong since the arms after the seventh were
+added — an instrument that miscounts its own control set is the one number a reader
+cannot check cheaply.)
 """
 
 import argparse
+import ast
+import collections
 import json
 import os
 import shutil
@@ -138,6 +159,30 @@ KNOWN_UNCOVERED = {
     "find_controls",
     "fleet_repos",
     "stale_identifier_neighbourhood",
+}
+
+# The structural property that separates a control set from the module it guards: a
+# control set declares the table of arms it can be asked to run. Measured over
+# `~/.nightly-shared` on 2026-08-31 — 54 python files, 25 control sets — this predicate
+# reproduces every row the `_selftest` suffix produces, with no file classified
+# differently by the two channels.
+ARM_TABLE_NAMES = frozenset({
+    "ARMS",
+    "CASES",
+    "CONTROL_ARMS",
+    "NEGATIVE_CONTROLS",
+    "SABOTAGES",
+})
+
+# Control sets that live in the root and whose filename does not carry the `_selftest`
+# suffix, so nothing in the name says which module they guard. The structural channel
+# recognises them as control sets and runs them either way; this registry is the only
+# thing that can say what they cover, so without an entry the module they guard is
+# still reported uncovered. Empty today — every control set in the root is spelled
+# `<module>_selftest.py` — and, like the two registries above, the audit fails if it
+# stops matching disk in either direction.
+UNSUFFIXED_CONTROL_SETS = {
+    # "control.py": "name_keyed_routing",
 }
 
 # A control set is allowed this long for its clean arm and for each sabotage arm. The
@@ -189,6 +234,41 @@ def module_stem(filename):
     return filename[: -len(".py")]
 
 
+def declares_an_arm_table(path):
+    """Does this file declare an arm table at module level, and is it readable at all?
+
+    Returns `(declares, unreadable_because)`. The second half is not decoration: this
+    predicate is the only thing in the audit that parses a file, so it is the only thing
+    that can find one that does not parse, and a file the classifier could not read is a
+    file it guessed about.
+
+    The structural property of a control set on this box is that it declares the table
+    of arms it can be asked to run — `SABOTAGES`, `ARMS`, `CASES`, `NEGATIVE_CONTROLS`
+    or `CONTROL_ARMS` — and a module does not. Read statically off the ast, with no
+    import, the same way `verify_hold.detect_shape` reads where a hold is taken: the
+    files in this root run suites and shell out to `go`, and importing one to ask what
+    it is would run it.
+
+    Only top-level assignments count. A name bound inside a function is a local and says
+    nothing about the file's shape, and `ast.walk` would count it.
+    """
+    try:
+        with open(path, "rb") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+    except (SyntaxError, ValueError) as error:
+        return False, f"{type(error).__name__}: {error}"
+    for node in tree.body:
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in ARM_TABLE_NAMES:
+                return True, None
+    return False, None
+
+
 def control_set_exists(path):
     """Is this control set on disk?
 
@@ -198,19 +278,69 @@ def control_set_exists(path):
     return os.path.exists(path)
 
 
-def discover(root):
-    """Split the root's python files into control sets and the modules they guard."""
+CONTROL_SET_SUFFIX = "_selftest"
+
+DiscoveredFiles = collections.namedtuple(
+    "DiscoveredFiles",
+    ["control_sets", "modules", "unattributed_control_sets", "unreadable"],
+)
+
+
+def discover(root, unsuffixed_control_sets=None):
+    """Split the root's python files into control sets and the modules they guard.
+
+    ⛔ **Classification is structural; only attribution reads the name.** Until
+    2026-08-31 this function decided both questions off the `_selftest` suffix, and a
+    control set spelled anything else got two wrong answers at once: it was not
+    recognised as a control set, so none of its arms ever ran, and it was then counted
+    as a module needing a guard of its own. Latent at 0 of 25 when it was found — every
+    control set in the root is spelled `<module>_selftest.py` — and card `da86b1ab`
+    names the promotion it fires on. A file that declares an arm table is a control set
+    whatever it is called.
+
+    The name channel is kept alongside the structural one rather than replaced by it,
+    and the union is deliberate: a control set that builds its arms in a shape the ast
+    read cannot see would otherwise be demoted to a module, and the two channels agree
+    on every file in the root today, so the union costs nothing and can only add.
+
+    Which module an unsuffixed control set guards is **not** derivable. Importing the
+    guarded module looked like the answer and is not: measured over the root's 25
+    control sets, only 9 import the module they guard, and `tree_hold_selftest.py`
+    imports `instrument_answered` instead because it drives `tree_hold` as a
+    subprocess. So the suffix stays the attribution channel where it is present,
+    `unsuffixed_control_sets` is the registry for where it is not, and anything left
+    over is returned unattributed rather than guessed at.
+    """
+    if unsuffixed_control_sets is None:
+        unsuffixed_control_sets = UNSUFFIXED_CONTROL_SETS
     control_sets = {}
     modules = set()
+    unattributed = {}
+    unreadable = {}
     for filename in sorted(os.listdir(root)):
         stem = module_stem(filename)
         if stem is None:
             continue
-        if stem.endswith("_selftest"):
-            control_sets[stem[: -len("_selftest")]] = os.path.join(root, filename)
-        else:
+        path = os.path.join(root, filename)
+        declares, unreadable_because = declares_an_arm_table(path)
+        if unreadable_because is not None:
+            # A python file in the instrument root that will not parse is broken
+            # whichever kind it is, and the classifier just guessed about it. Say so.
+            unreadable[filename] = unreadable_because
+        if not (declares or stem.endswith(CONTROL_SET_SUFFIX)):
             modules.add(stem)
-    return control_sets, modules
+            continue
+        if stem.endswith(CONTROL_SET_SUFFIX):
+            control_sets[stem[: -len(CONTROL_SET_SUFFIX)]] = path
+        elif filename in unsuffixed_control_sets:
+            control_sets[unsuffixed_control_sets[filename]] = path
+        else:
+            # Recognised, so it will be run; unattributed, so it covers nothing. Keyed
+            # by its own stem to keep it out of `modules` and to give the report a name
+            # to print — never by the module it might guard, which is the guess.
+            unattributed[stem] = path
+            control_sets[stem] = path
+    return DiscoveredFiles(control_sets, modules, unattributed, unreadable)
 
 
 CAUGHT_BY_MARKER = "caught by "
@@ -455,25 +585,63 @@ def list_sabotages(path, clean_output):
     return names or None
 
 
-def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=None):
+def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=None,
+          unsuffixed_control_sets=None):
     """Run every control set guarding a module in `root` and return the result.
 
-    The two baselines are parameters rather than reads of the module constants so that
-    this function can be driven over a fixture directory. A control set that can only
-    be pointed at the one directory it audits cannot be given cases, and an audit with
-    no cases is the thing this whole file exists to argue against.
+    The three registries are parameters rather than reads of the module constants so
+    that this function can be driven over a fixture directory. A control set that can
+    only be pointed at the one directory it audits cannot be given cases, and an audit
+    with no cases is the thing this whole file exists to argue against.
     """
     if external_control_sets is None:
         external_control_sets = EXTERNAL_CONTROL_SETS
     if known_uncovered is None:
         known_uncovered = KNOWN_UNCOVERED
+    if unsuffixed_control_sets is None:
+        unsuffixed_control_sets = UNSUFFIXED_CONTROL_SETS
     result = {
         "root": root,
         "control_sets": [],
         "uncovered": [],
+        "unattributed_control_sets": [],
         "findings": [],
     }
-    control_sets, modules = discover(root)
+    discovered = discover(root, unsuffixed_control_sets=unsuffixed_control_sets)
+    control_sets, modules = discovered.control_sets, discovered.modules
+    result["unattributed_control_sets"] = sorted(discovered.unattributed_control_sets)
+
+    for filename in sorted(discovered.unreadable):
+        # The classifier could not read this file, so whichever side it landed on was a
+        # guess. A guess that is never reported is the silence this whole script argues
+        # against, and it does not become a fact by being cheap to miss.
+        result["findings"].append(
+            f"{filename}: does not parse, so the audit could not tell a control set"
+            f" from a module — {discovered.unreadable[filename]}"
+        )
+
+    for stem in sorted(discovered.unattributed_control_sets):
+        # It runs — that is the half this repair bought. But nothing says which module
+        # it guards, so that module is still reported uncovered, and a coverage answer
+        # the audit knows is incomplete must not read as a clean one.
+        result["findings"].append(
+            f"{stem}: declares an arm table and does not end in {CONTROL_SET_SUFFIX!r},"
+            f" so its arms run and nothing says which module it guards"
+            f" — add it to UNSUFFIXED_CONTROL_SETS"
+        )
+
+    for filename, module in sorted(unsuffixed_control_sets.items()):
+        # Both directions, exactly as the other two registries are checked: a registry
+        # pointing at a file that is gone, or at a module that is gone, is rot.
+        if not control_set_exists(os.path.join(root, filename)):
+            result["findings"].append(
+                f"{module}: UNSUFFIXED_CONTROL_SETS names {filename!r}, which is not in {root}"
+            )
+        elif module not in modules:
+            result["findings"].append(
+                f"{module}: UNSUFFIXED_CONTROL_SETS says {filename!r} guards it, and it"
+                f" is not a module in {root}"
+            )
 
     for module, path in external_control_sets.items():
         if module not in modules:
@@ -605,6 +773,13 @@ def report(result, stream=None):
                 f" {record.get('sabotages_unrun_because')}",
                 file=stream,
             )
+
+    if result.get("unattributed_control_sets"):
+        print(
+            "control sets that guard an unnamed module: "
+            + ", ".join(result["unattributed_control_sets"]),
+            file=stream,
+        )
 
     if result["uncovered"]:
         print(

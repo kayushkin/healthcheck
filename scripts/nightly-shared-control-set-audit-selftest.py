@@ -20,6 +20,13 @@ A sabotage breaks one of the audit's predicates and **must redden at least one c
 A sabotage nothing catches is a hole in the case list, not a robust audit, and this
 script says so and exits non-zero when it happens.
 
+**34 cases, 15 sabotage arms, all caught, measured 2026-08-31.** Nine of the cases and
+six of the arms cover `discover` classifying a file by what it declares rather than by
+what it is called (card `da86b1ab`), and two of those arms exist to stop one broad
+sabotage standing in for three: an arm whose filter is wider than the predicate it
+names reddens cases it did not earn, and the case list then looks pinned when only one
+of its rows is.
+
 ⚠️ **This control set exits 0 on a CAUGHT sabotage** and reports the catch in a
 `caught by N case(s)` line, matching `reach_control_selftest.py` and the build-tag
 control set. It exits non-zero only when a sabotage changed nothing, which is the
@@ -170,6 +177,39 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 '''
 
 MODULE_SOURCE = "# a shared instrument\n"
+
+# A module that binds an arm-table name INSIDE a function. It is a local and says
+# nothing about the file's shape, and it is what separates reading `tree.body` from
+# reading `ast.walk` — the walk promotes this shared instrument to a control set and
+# then runs it as though it were a suite.
+MODULE_WITH_A_LOCAL_CALLED_ARMS = '''\
+def summarise(rows):
+    CASES = [row for row in rows if row]
+    return CASES
+'''
+
+# A conforming control set that declares no module-level arm table: its arms come back
+# from a call. The structural channel cannot see it, the `_selftest` suffix can, and it
+# is why `discover` unions the two channels rather than replacing one with the other.
+CONFORMING_WITHOUT_AN_ARM_TABLE = '''\
+import sys
+def arms():
+    return ["breaks-the-predicate"]
+if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
+    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+if "--list-sabotages" in sys.argv:
+    print("\\n".join(arms())); sys.exit(0)
+if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
+    if sys.argv[2] not in arms():
+        print("unknown sabotage %r" % sys.argv[2]); sys.exit(2)
+    print("SABOTAGE %s: 1/2 rows as expected" % sys.argv[2]); sys.exit(1)
+print("CLEAN: 2/2 rows as expected"); sys.exit(0)
+'''
+
+# A python file in the instrument root that will not parse. The classifier reads the
+# ast, so this is the one file it cannot answer about, and the answer it gives anyway
+# is a guess.
+DOES_NOT_PARSE = "def broken(:\n    pass\n"
 
 
 def build_fixture(directory, modules=(), control_sets=(), extra_files=()):
@@ -398,6 +438,136 @@ def case_report_names_every_control_set_it_ran(work):
             and "sabotage breaks-the-predicate" in text), f"report={text!r}"
 
 
+def case_a_control_set_is_recognised_by_its_arm_table(work):
+    """The card's fixture: two files of identical structure, one spelled otherwise.
+
+    `alpha.py` is guarded by `alpha_selftest.py` and `beta.py` by `control.py`. Before
+    2026-08-31 the second pair got two wrong answers off one spelling — `control.py`
+    was not run at all, and it was counted as a module needing a guard of its own.
+    """
+    root = build_fixture(
+        os.path.join(work, "armtable"), modules=["alpha", "beta"],
+        control_sets=[("alpha", CONFORMING)],
+        extra_files=[("control.py", CONFORMING)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"beta"}, unsuffixed_control_sets={})
+    ran = {record["module"] for record in result["control_sets"]}
+    return ("control" in ran and "control" not in result["uncovered"]), \
+        f"ran={sorted(ran)} uncovered={result['uncovered']}"
+
+
+def case_an_unsuffixed_control_set_has_its_arms_run(work):
+    """Recognising it is worth nothing on its own — the point is that its arms run."""
+    root = build_fixture(
+        os.path.join(work, "armtablearms"), modules=["beta"],
+        extra_files=[("control.py", CONFORMING)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"beta"}, unsuffixed_control_sets={})
+    record = [r for r in result["control_sets"] if r["module"] == "control"][0]
+    labels = [arm["label"] for arm in record["arms"]]
+    return labels == ["clean", "sabotage breaks-the-predicate"], f"labels={labels}"
+
+
+def case_an_unattributed_control_set_is_a_finding(work):
+    """It runs, and nothing says what it covers. A coverage answer the audit knows is
+    incomplete must not read as a clean one."""
+    root = build_fixture(
+        os.path.join(work, "unattributed"), modules=["beta"],
+        extra_files=[("control.py", CONFORMING)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"beta"}, unsuffixed_control_sets={})
+    return bool(findings_matching(result, "UNSUFFIXED_CONTROL_SETS")), \
+        f"findings={result['findings']}"
+
+
+def case_the_registry_attributes_an_unsuffixed_control_set(work):
+    """With the registry entry, `beta` is covered and the whole fixture is silent."""
+    root = build_fixture(
+        os.path.join(work, "attributed"), modules=["beta"],
+        extra_files=[("control.py", CONFORMING)],
+    )
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set(),
+                                unsuffixed_control_sets={"control.py": "beta"})
+    ran = {record["module"] for record in result["control_sets"]}
+    return (not result["findings"] and ran == {"beta"} and result["uncovered"] == []), \
+        f"findings={result['findings']} ran={sorted(ran)} uncovered={result['uncovered']}"
+
+
+def case_unsuffixed_registry_naming_a_missing_file_is_a_finding(work):
+    """Checked in the same direction as the other two registries: a registry pointing
+    at a file that is gone is rot, and it is silent."""
+    root = build_fixture(
+        os.path.join(work, "regmissingfile"), modules=["beta"],
+        extra_files=[("control.py", CONFORMING)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"beta"},
+                                unsuffixed_control_sets={"no_such_control.py": "beta"})
+    return bool(findings_matching(result, "which is not in")), \
+        f"findings={result['findings']}"
+
+
+def case_unsuffixed_registry_naming_an_absent_module_is_a_finding(work):
+    """And in the other direction: the module it claims to guard is not there."""
+    root = build_fixture(
+        os.path.join(work, "regghost"), modules=["beta"],
+        extra_files=[("control.py", CONFORMING)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"beta"},
+                                unsuffixed_control_sets={"control.py": "departed"})
+    return bool(findings_matching(result, "is not a module in")), \
+        f"findings={result['findings']}"
+
+
+def case_a_file_that_does_not_parse_is_a_finding(work):
+    """The classifier reads the ast, so a file it cannot parse is one it guessed about."""
+    root = build_fixture(
+        os.path.join(work, "unparsable"), modules=["alpha"],
+        control_sets=[("alpha", CONFORMING)],
+        extra_files=[("wreckage.py", DOES_NOT_PARSE)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"wreckage"}, unsuffixed_control_sets={})
+    return bool(findings_matching(result, "does not parse")), \
+        f"findings={result['findings']}"
+
+
+def case_a_local_named_arms_does_not_promote_a_module(work):
+    """The negative control for the structural read: only top-level bindings count.
+
+    A shared instrument with `CASES = [...]` inside a function is a module. Reading the
+    whole tree instead of `tree.body` promotes it to a control set, and the audit then
+    runs a library as though it were a suite.
+    """
+    root = build_fixture(
+        os.path.join(work, "localarms"), modules=["alpha"],
+        control_sets=[("alpha", CONFORMING)],
+        extra_files=[("summariser.py", MODULE_WITH_A_LOCAL_CALLED_ARMS)],
+    )
+    result = audit_module.audit(root, external_control_sets={},
+                                known_uncovered={"summariser"}, unsuffixed_control_sets={})
+    ran = {record["module"] for record in result["control_sets"]}
+    return ("summariser" not in ran and result["uncovered"] == ["summariser"]), \
+        f"ran={sorted(ran)} uncovered={result['uncovered']} findings={result['findings']}"
+
+
+def case_a_suffixed_set_without_an_arm_table_is_still_a_control_set(work):
+    """The union half. Narrowing classification to the structural channel alone would
+    demote a control set that builds its arms in a shape the ast read cannot see."""
+    root = build_fixture(
+        os.path.join(work, "unionhalf"), modules=["alpha"],
+        control_sets=[("alpha", CONFORMING_WITHOUT_AN_ARM_TABLE)])
+    result = audit_module.audit(root, external_control_sets={}, known_uncovered=set(),
+                                unsuffixed_control_sets={})
+    ran = {record["module"] for record in result["control_sets"]}
+    return (not result["findings"] and ran == {"alpha"}), \
+        f"findings={result['findings']} ran={sorted(ran)}"
+
+
 def run_main_quietly(argv):
     """Drive the audit's own entry point without its report landing in this output.
 
@@ -515,6 +685,15 @@ CASES = [
     ("an absent go toolchain refuses the audit", case_absent_go_toolchain_refuses_the_audit),
     ("mise's shims supply the toolchain", case_shim_directory_supplies_the_toolchain),
     ("a finding makes main exit 1", case_findings_make_main_exit_one),
+    ("a control set is recognised by its arm table", case_a_control_set_is_recognised_by_its_arm_table),
+    ("an unsuffixed control set has its arms run", case_an_unsuffixed_control_set_has_its_arms_run),
+    ("an unattributed control set is a finding", case_an_unattributed_control_set_is_a_finding),
+    ("the registry attributes an unsuffixed control set", case_the_registry_attributes_an_unsuffixed_control_set),
+    ("an unsuffixed registry naming a missing file is a finding", case_unsuffixed_registry_naming_a_missing_file_is_a_finding),
+    ("an unsuffixed registry naming an absent module is a finding", case_unsuffixed_registry_naming_an_absent_module_is_a_finding),
+    ("a file that does not parse is a finding", case_a_file_that_does_not_parse_is_a_finding),
+    ("a local named ARMS does not promote a module", case_a_local_named_arms_does_not_promote_a_module),
+    ("a suffixed set with no arm table is still a control set", case_a_suffixed_set_without_an_arm_table_is_still_a_control_set),
 ]
 
 
@@ -618,6 +797,126 @@ def _sabotage_a_missing_toolchain_is_someone_elses_problem():
     audit_module.ensure_go_toolchain_on_path = lambda: None
 
 
+def _sabotage_classify_by_the_suffix_alone():
+    """The defect card `da86b1ab` names: decide control-set-or-module by the spelling.
+
+    ⚠️ This restores the old *behaviour* and keeps the current return shape. Deleting
+    the extra fields instead would make `audit` raise on every case, and a control set
+    that reads only "did the case fail" cannot tell a caught defect from an instrument
+    it stopped from running at all.
+    """
+    def by_the_suffix(root, unsuffixed_control_sets=None):
+        control_sets, modules = {}, set()
+        for filename in sorted(os.listdir(root)):
+            stem = audit_module.module_stem(filename)
+            if stem is None:
+                continue
+            if stem.endswith("_selftest"):
+                control_sets[stem[: -len("_selftest")]] = os.path.join(root, filename)
+            else:
+                modules.add(stem)
+        return audit_module.DiscoveredFiles(control_sets, modules, {}, {})
+
+    audit_module.discover = by_the_suffix
+
+
+def _sabotage_an_arm_table_is_not_structural():
+    """Empty the name set, so the ast read can never say yes and only the suffix does.
+
+    Distinct from the arm above: that one takes the structural channel out of
+    `discover`, this one leaves the channel wired and makes it blind. Both must redden,
+    or the case list is pinning the call and not the predicate.
+    """
+    audit_module.ARM_TABLE_NAMES = frozenset()
+
+
+def _sabotage_read_arm_names_anywhere_in_the_file():
+    """Read the whole tree instead of its top level, so a local counts as a declaration.
+
+    `CASES = [...]` inside a function says nothing about the file's shape, and a walk
+    promotes that shared instrument to a control set — after which the audit runs a
+    library as though it were a suite and reports whatever it prints.
+    """
+    def by_walking_the_whole_tree(path):
+        try:
+            with open(path, "rb") as handle:
+                tree = audit_module.ast.parse(handle.read(), filename=path)
+        except (SyntaxError, ValueError) as error:
+            return False, f"{type(error).__name__}: {error}"
+        for node in audit_module.ast.walk(tree):
+            targets = []
+            if isinstance(node, audit_module.ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (audit_module.ast.AnnAssign, audit_module.ast.AugAssign)):
+                targets = [node.target]
+            for target in targets:
+                if (isinstance(target, audit_module.ast.Name)
+                        and target.id in audit_module.ARM_TABLE_NAMES):
+                    return True, None
+        return False, None
+
+    audit_module.declares_an_arm_table = by_walking_the_whole_tree
+
+
+def _sabotage_an_unattributed_control_set_is_a_skip():
+    """Run it and say nothing about what it covers.
+
+    The quiet half of the repair. Its arms still run, so the loud complaint is answered
+    and the coverage answer is still wrong — which is the shape that survives review.
+
+    ⚠️ The filter names the finding's own words rather than the registry's name. The
+    first authoring matched on `UNSUFFIXED_CONTROL_SETS`, which appears in the registry
+    complaints too, so this one arm reddened three cases and the two registry cases had
+    no arm of their own — a broad sabotage borrows evidence it did not earn.
+    """
+    original = audit_module.audit
+
+    def without_the_complaint(root, **kwargs):
+        result = original(root, **kwargs)
+        result["findings"] = [
+            f for f in result["findings"]
+            if "declares an arm table and does not end in" not in f
+        ]
+        return result
+
+    audit_module.audit = without_the_complaint
+
+
+def _sabotage_the_unsuffixed_registry_is_never_checked():
+    """Stop comparing UNSUFFIXED_CONTROL_SETS against disk in either direction.
+
+    `EXTERNAL_CONTROL_SETS` and `KNOWN_UNCOVERED` are both checked both ways, and the
+    argument in this file is that a registry which stops matching disk is rot. A third
+    registry that is never checked is that rot with the argument already written down.
+    """
+    original = audit_module.audit
+
+    def without_the_registry_checks(root, **kwargs):
+        result = original(root, **kwargs)
+        result["findings"] = [
+            f for f in result["findings"] if "UNSUFFIXED_CONTROL_SETS names" not in f
+            and "UNSUFFIXED_CONTROL_SETS says" not in f
+        ]
+        return result
+
+    audit_module.audit = without_the_registry_checks
+
+
+def _sabotage_an_unparsable_file_is_a_module():
+    """Swallow the parse failure and file the wreckage under modules.
+
+    A file the classifier could not read is one it guessed about, and the guess is the
+    reassuring one: it becomes an ordinary module and the baseline absorbs it.
+    """
+    original = audit_module.declares_an_arm_table
+
+    def quietly(path):
+        declares, _unreadable_because = original(path)
+        return declares, None
+
+    audit_module.declares_an_arm_table = quietly
+
+
 SABOTAGES = {
     "a-missing-toolchain-is-someone-elses-problem":
         _sabotage_a_missing_toolchain_is_someone_elses_problem,
@@ -629,6 +928,12 @@ SABOTAGES = {
     "an-unreadable-verdict-passes": _sabotage_an_unreadable_verdict_passes,
     "coverage-is-never-checked": _sabotage_coverage_is_never_checked,
     "an-absent-root-is-green": _sabotage_an_absent_root_is_green,
+    "classify-by-the-suffix-alone": _sabotage_classify_by_the_suffix_alone,
+    "an-arm-table-is-not-structural": _sabotage_an_arm_table_is_not_structural,
+    "read-arm-names-anywhere-in-the-file": _sabotage_read_arm_names_anywhere_in_the_file,
+    "an-unattributed-control-set-is-a-skip": _sabotage_an_unattributed_control_set_is_a_skip,
+    "the-unsuffixed-registry-is-never-checked": _sabotage_the_unsuffixed_registry_is_never_checked,
+    "an-unparsable-file-is-a-module": _sabotage_an_unparsable_file_is_a_module,
 }
 
 
