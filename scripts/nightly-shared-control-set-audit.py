@@ -75,6 +75,30 @@ per arm which of the two said so, and calls the verdict UNREADABLE — a finding
 pass — when neither does. That fork is still open: it is the contested half of card
 `3165bed1` and no control set's verdict convention was changed.
 
+## ⛔ A crash is not a verdict, and it is loud on the channel a catch is quiet on
+
+Card `43a460d2`, 2026-08-30: 11 of the 20 shared scorers answer a harness-break probe
+with an uncaught Python traceback rather than a graded arm. From the scorer's own
+printed output that is the safe direction — it refused to grade, so it cannot report a
+false catch. But a traceback exits non-zero, and non-zero is the first channel above.
+So the same break the scorer refused to grade was graded a **catch** one layer up, and
+the run went GREEN with zero findings. Reproduced end to end before repair.
+
+`harness_break_line` now reads the arm's output for a traceback and
+`read_sabotage_verdict` asks it **before** either verdict channel, stamping the third
+outcome `harness-break` — a finding, never a catch and never a hole. The same reading
+guards the `--sabotage` capability probe, which had the defect in its sharpest form: a
+control set that crashed on the nonsense arm exited non-zero, was therefore declared to
+honour the flag, had its arms listed and run, and every one of those arms crashed and
+was graded caught. `worktree_cost_selftest.py` is the box's worked example of a control
+set reporting this shape about itself.
+
+⚠️ **What this does NOT do**, and it is the open half of `43a460d2`: it changes no
+scorer. Whether a harness break should be a distinct **exit status** on the 11 — a
+third code rather than 0/1 — is a convention change across other passes' instruments
+and is not an unattended call. This repair makes the audit stop misreading them; it
+does not make them speak.
+
 **The `->` columns are what card `3165bed1` closed on 2026-08-22.** THREE of the four
 ignored an unrecognised flag — not two, as this docstring said before it was re-measured
 — and printed their ordinary green report, so `--list-sabotages` against them yielded
@@ -121,11 +145,11 @@ script's own control set is unsound. Exit 2 = the audit could not be carried out
 (the root is missing) — kept apart from exit 1 so a caller cannot read "could not run"
 as "ran and found nothing".
 
-Pinned by `scripts/nightly-shared-control-set-audit-selftest.py`: 34 cases and 15
-sabotage arms, all caught, measured 2026-08-31. (The count read "19 cases and 7
-sabotage arms" until then, and had been wrong since the arms after the seventh were
-added — an instrument that miscounts its own control set is the one number a reader
-cannot check cheaply.)
+Pinned by `scripts/nightly-shared-control-set-audit-selftest.py`: 38 cases and 17
+sabotage arms, clean 38/38 and all 17 caught, measured 2026-09-25 when the arm-table
+branch (34 cases, 15 arms) and the traceback branch (29 cases, 11 arms) were merged.
+An instrument that miscounts its own control set is the one number a reader cannot
+check cheaply, so re-take it when you add a case or an arm.
 """
 
 import argparse
@@ -345,6 +369,38 @@ def discover(root, unsuffixed_control_sets=None):
 
 CAUGHT_BY_MARKER = "caught by "
 
+# The first line CPython writes for an unhandled exception. Both spellings occur: the
+# plain one, and the "during handling of the above exception" chain.
+TRACEBACK_MARKERS = (
+    "Traceback (most recent call last):",
+    "During handling of the above exception, another exception occurred:",
+)
+
+
+def harness_break_line(output):
+    """The exception line of a control set that crashed, or None if it did not.
+
+    A control set that dies with an unhandled exception did not grade its arm. It
+    reached no case, said nothing about the instrument, and exited non-zero on the way
+    out — and a non-zero exit is exactly the channel `read_sabotage_verdict` reads a
+    CATCH from. So the safest-looking outcome the scorer can produce (it refused to
+    answer) becomes the strongest one the audit can report (the sabotage was caught),
+    and nothing in between notices. Card `43a460d2` measured 11 of the 20 shared
+    scorers answering the harness-break probe this way.
+
+    This is the audit's own docstring warning turned into a predicate. `list_sabotages`
+    already says a bad arm name gets "a `KeyError` traceback per arm, and [the audit]
+    reads every one of those tracebacks as a caught sabotage" — that was written about
+    one path and is true of every path.
+
+    Returns the last non-empty line of the crashed output (`KeyError: ...`), because a
+    finding that does not say what broke sends the reader back to run the arm again.
+    """
+    if not any(marker in output for marker in TRACEBACK_MARKERS):
+        return None
+    lines = [line for line in output.strip().splitlines() if line.strip()]
+    return lines[-1].strip() if lines else "an unhandled exception with no message"
+
 
 def caught_row_count(output):
     """How many rows a sabotage arm says it reddened, or None if it does not say.
@@ -412,6 +468,16 @@ def read_sabotage_verdict(arm):
     control set, which speaks the non-zero dialect, so this function is the one place
     that knows how to read either.
     """
+    broke = harness_break_line(arm["output"])
+    if broke:
+        # Asked before either verdict channel, because a crash speaks the same channel
+        # a catch does and speaks it louder. An arm that raised graded nothing, so
+        # neither "caught" nor "uncaught" is available — the third outcome is the only
+        # honest one, and it is a finding. `worktree_cost_selftest.py` is the worked
+        # example of a control set reporting this shape about itself.
+        arm["verdict"] = "harness-break"
+        arm["verdict_read_from"] = "an unhandled exception, which grades nothing"
+        return f"crashed instead of grading: {broke}"
     if not arm["ok"]:
         arm["verdict"] = "caught"
         arm["verdict_read_from"] = "the exit code"
@@ -497,21 +563,36 @@ def run_own_control_set(stream=None):
             os.environ[NESTING_GUARD_VARIABLE] = previous
 
 
-def honours_sabotage_flag(path):
-    """Does this control set implement `--sabotage`, or does it ignore unknown flags?
+def probe_sabotage_flag(path):
+    """Does this control set implement `--sabotage`, ignore it, or crash on it?
 
     Two of the four control sets on this box ignore an argument they do not recognise
     and print their ordinary green report. Asking one of those for `--list-sabotages`
     returns its whole report, and a reader that splits it into words gets sabotage arms
     named `CAUGHT`, `GREEN` and `9/9`. So capability is probed, never assumed: a
     control set that honours the protocol must refuse an arm that cannot exist.
+
+    Three outcomes, not two, and the third is why this is no longer a predicate called
+    `honours_sabotage_flag`. A control set that raises on the nonsense arm exits
+    non-zero, which the old reading took for the clean refusal it was hoping for — so a
+    crashing control set was declared conforming, its arms were listed and run, and
+    every one of those arms crashed too and was graded a caught sabotage. That is card
+    `43a460d2` in one call: the probe and the verdict read the same channel, and a
+    harness break is louder on it than either answer.
+
+    Returns `{"honoured": bool, "harness_break": str or None}`. A break is reported by
+    the caller and never counted as either answer.
     """
     arm = run_arm([sys.executable, path, "--sabotage", NONSENSE_SABOTAGE], "probe")
     if arm["timed_out"]:
-        return False
+        return {"honoured": False, "harness_break": None}
+    broke = harness_break_line(arm["output"])
+    if broke:
+        return {"honoured": False, "harness_break": broke}
     # Either channel is enough, because the two conforming dialects use different ones:
     # a non-zero exit, or a line saying the name is not one of its arms.
-    return arm["exit_code"] != 0 or "unknown sabotage" in arm["output_tail"].lower()
+    honoured = arm["exit_code"] != 0 or "unknown sabotage" in arm["output_tail"].lower()
+    return {"honoured": honoured, "harness_break": None}
 
 
 def refuses_an_unrecognised_flag(path):
@@ -542,7 +623,7 @@ def list_sabotages(path, clean_output):
 
     None and the empty list are different answers and the report keeps them apart:
     None means the control set cannot be asked, the empty list means it was asked and
-    has none. Only called once `honours_sabotage_flag` has said `--sabotage` is real.
+    has none. Only called once `probe_sabotage_flag` has said `--sabotage` is real.
 
     Honouring `--sabotage` does not imply honouring `--list-sabotages`, and one of the
     four control sets on this box honours the first and ignores the second: it runs its
@@ -680,7 +761,15 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
         clean = run_arm([sys.executable, path], "clean")
         record["arms"].append(clean)
         if not clean["ok"]:
-            how = "timed out" if clean["timed_out"] else f"exit {clean['exit_code']}"
+            if clean["timed_out"]:
+                how = "timed out"
+            else:
+                broke = harness_break_line(clean["output"])
+                how = (
+                    f"crashed instead of running: {broke}"
+                    if broke
+                    else f"exit {clean['exit_code']}"
+                )
             result["findings"].append(f"{module}: clean arm {how}")
             # The sabotage arms of a control set whose clean arm is red cannot be
             # read — a red they produce is indistinguishable from the red already
@@ -694,7 +783,19 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
             record["sabotages_unrun_because"] = "sabotage arms were not requested"
             continue
 
-        if not honours_sabotage_flag(path):
+        flag_probe = probe_sabotage_flag(path)
+        if flag_probe["harness_break"]:
+            record["sabotages_run"] = False
+            record["sabotages_unrun_because"] = (
+                "the control set crashed on the capability probe, so whether it "
+                "honours --sabotage is unknown rather than answered"
+            )
+            result["findings"].append(
+                f"{module}: crashed on the --sabotage capability probe instead of "
+                f"refusing an arm that cannot exist: {flag_probe['harness_break']}"
+            )
+            continue
+        if not flag_probe["honoured"]:
             record["sabotages_run"] = False
             record["sabotages_unrun_because"] = (
                 "the control set does not honour --sabotage; it ignored an arm that "
