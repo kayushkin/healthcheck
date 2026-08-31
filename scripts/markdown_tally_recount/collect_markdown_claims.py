@@ -113,9 +113,12 @@ def git(path, *arguments):
 
 def repositories():
     for name in sorted(os.listdir(REPOS_ROOT)):
-        if "-wt-" in name or name in VENDORED:
+        if name in VENDORED:
             continue
         path = os.path.join(REPOS_ROOT, name)
+        # A linked worktree's .git is a FILE, not a directory, so this is what excludes
+        # one. A `-wt-` substring test used to sit above it and answer the same question
+        # from the spelling of the directory, which nothing enforces. Card `0819ded1`.
         if os.path.isdir(os.path.join(path, ".git")):
             yield name, path
 

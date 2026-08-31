@@ -37,11 +37,14 @@ def fleet_repositories():
     found = []
     for root in roots:
         for name in sorted(os.listdir(root)):
-            if "-wt-" in name or name in EXCLUDED_REPOS:
+            if name in EXCLUDED_REPOS:
                 continue
             path = os.path.join(root, name)
             # A linked worktree's .git is a FILE, not a directory. Counting one
             # double-counts its parent's blobs and reports its branch as a parked repo.
+            # This is the ONLY worktree test. A `-wt-` substring test used to sit above
+            # it and answer the same question from the spelling of the directory, which
+            # nothing enforces -- do not re-add it. Card `0819ded1`.
             if not os.path.isdir(os.path.join(path, ".git")):
                 continue
             found.append((name, path))
