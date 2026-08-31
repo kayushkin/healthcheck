@@ -1195,6 +1195,161 @@ else
   echo "SKIP  node empty-sweep fixture (npm is not on PATH)"
 fi
 
+# ------------------------------------------------- fixture DETAIL PAST THE NOISE
+# A red repo must name the test that reddened it.
+#
+# `go test ./...` prints one line per package, so a repo with many packages emits
+# a wall of `?  pkg [no test files]` BEFORE the first `--- FAIL:`. The detail
+# field used to be the head of that stream, so for a repo of this shape it stored
+# six `?` lines and named nothing. Measured over three stored fleet sweeps, 4 of
+# 13 stage=test failures had a detail naming no test — `logstack` in every sweep
+# since 2026-08-22, and `scheduler`.
+#
+# The fixture is built to that shape deliberately: the failing package sorts LAST,
+# behind enough silent packages to bury the failure past any fixed head cut. A
+# fixture with one package would pass either way and pin nothing.
+# Scored per defect rather than only against the shipped state, and the matrix is
+# the reason this comment exists (128 arms total; only the nine below move):
+#
+#                                        break      break      break
+#   arm                                  selection  writer     both
+#   -----------------------------------  ---------  ---------  ---------
+#   names the TEST                       RED        pass       RED
+#   carries the assertion                RED        pass       RED
+#   boilerplate does not crowd it out    RED        pass       PASS  <--
+#   a tab is not cut at the tab          RED        RED        RED
+#   the tab itself survives              pass       RED        RED
+#   KNOWN-NEGATIVE single-package repo   pass       pass       pass
+#   build break reports compiler error   pass       pass       pass
+#   build break drops the '#' header     pass       pass       pass
+#
+# ⭐ Read the marked row. "Boilerplate does not crowd it out" catches the
+# selection defect on its own and PASSES when both defects are present -- the
+# writer defect cuts the boilerplate away before that arm can see it, so one
+# defect masks the arm for the other. Anyone scoring this set the obvious way
+# (revert the whole change, count the reds) gets 4 and never learns that.
+# **Score each defect separately, or an arm set under-reports its own power.**
+DET="$ROOT/detail"
+mkdir -p "$DET"
+make_repo "$DET/noisy" -
+for i in 1 2 3 4 5 6 7 8; do
+  mkdir -p "$DET/noisy/apkg$i"
+  printf 'package apkg%s\n\nfunc Unused%s() int { return %s }\n' "$i" "$i" "$i" \
+    > "$DET/noisy/apkg$i/a.go"
+done
+mkdir -p "$DET/noisy/zlast"
+printf 'package zlast\n\nfunc Answer() int { return 41 }\n' > "$DET/noisy/zlast/z.go"
+cat > "$DET/noisy/zlast/z_test.go" <<'GOEOF'
+package zlast
+
+import "testing"
+
+func TestTheAnswerIsPinned(t *testing.T) {
+	if Answer() != 42 {
+		t.Fatalf("expected 42, got %d", Answer())
+	}
+}
+GOEOF
+git -C "$DET/noisy" add -A
+git -C "$DET/noisy" commit -qm packages
+
+if command -v go >/dev/null 2>&1; then
+  REPORTD="$ROOT/detail.json"
+  REPOS_DIR="$DET" REPORT="$REPORTD" bash "$AUDIT" --with-tests >"$ROOT/detail.out" 2>&1
+  det_detail=$(report_field "$REPORTD" '([f["detail"] for f in d.get("failures") or []] or [""])[0]')
+
+  check "detail: the noisy repo is red at the test stage in the first place" \
+        "1 test" \
+        "$(report_field "$REPORTD" 'd["failed"]') $(report_field "$REPORTD" '([f["stage"] for f in d.get("failures") or []] or ["-"])[0]')"
+
+  # The headline. Without the fix this is "no", and every other arm here still passes.
+  check "detail: a red repo names the TEST that reddened it" \
+        "yes" \
+        "$(case "$det_detail" in *"--- FAIL: TestTheAnswerIsPinned"*) echo yes ;; *) echo "no: ${det_detail:0:70}" ;; esac)"
+
+  # Naming the test is not enough — the assertion is what a reader acts on.
+  check "detail: it carries the assertion, not only the test name" \
+        "yes" \
+        "$(case "$det_detail" in *"expected 42, got 41"*) echo yes ;; *) echo "no: ${det_detail:0:70}" ;; esac)"
+
+  # TWO independent defects produced the empty answer, and each needs its own arm.
+  # Measured as a 2x2 over the same fixture:
+  #
+  #   selection  writer   stored detail
+  #   ---------  ------   --------------------------------------------------
+  #      no        no     "?   "                        <- what shipped
+  #      no       yes     six lines of [no test files]  <- names nothing
+  #     yes        no     "--- FAIL: ... got 41 FAIL"   <- cut at the first tab
+  #     yes       yes     the whole line                <- correct
+  #
+  # So this arm — boilerplate must not crowd the failure out — is only
+  # NON-VACUOUS once the writer is fixed. With the writer broken the detail is
+  # four characters and contains no boilerplate either, and the arm passes for
+  # the wrong reason. It is kept because it is the arm that catches a regression
+  # in the SELECTION once the writer is right.
+  check "detail: the package boilerplate does not crowd the failure out" \
+        "yes" \
+        "$(case "$det_detail" in *"[no test files]"*) echo "no: ${det_detail:0:70}" ;; *) echo yes ;; esac)"
+
+  # And the writer half. `go test` output is tab-separated, and the results array
+  # is too, so a report writer taking only the first field after `seconds` cut
+  # every detail at its first embedded tab. Pin that a detail carrying a tab
+  # survives it, by asserting on text that sits AFTER one.
+  check "detail: a detail carrying a tab is not cut at the tab" \
+        "yes" \
+        "$(case "$det_detail" in *"noisy/zlast"*) echo yes ;; *) echo "no: ${det_detail:0:90}" ;; esac)"
+  check "detail: and the tab itself survives, so the field is not silently reflowed" \
+        "yes" \
+        "$(case "$det_detail" in *"$(printf '\t')"*) echo yes ;; *) echo "no: ${det_detail:0:90}" ;; esac)"
+
+  # KNOWN-NEGATIVE. A repo whose failure is already the first line must be
+  # untouched by the change — otherwise the new filter is rewriting details that
+  # were correct, and every arm above would still be green.
+  SHALLOW="$ROOT/detail-shallow"
+  mkdir -p "$SHALLOW"
+  make_repo "$SHALLOW/plain" -
+  printf 'package plain\n\nfunc Answer() int { return 41 }\n' > "$SHALLOW/plain/p.go"
+  cat > "$SHALLOW/plain/p_test.go" <<'GOEOF'
+package plain
+
+import "testing"
+
+func TestPlainIsPinned(t *testing.T) {
+	if Answer() != 42 {
+		t.Fatalf("expected 42, got %d", Answer())
+	}
+}
+GOEOF
+  git -C "$SHALLOW/plain" add -A
+  git -C "$SHALLOW/plain" commit -qm plain
+  REPORTS="$ROOT/detail-shallow.json"
+  REPOS_DIR="$SHALLOW" REPORT="$REPORTS" bash "$AUDIT" --with-tests >"$ROOT/detail-shallow.out" 2>&1
+  sh_detail=$(report_field "$REPORTS" '([f["detail"] for f in d.get("failures") or []] or [""])[0]')
+  check "detail: KNOWN-NEGATIVE a single-package repo already named its test and still does" \
+        "yes" \
+        "$(case "$sh_detail" in "--- FAIL: TestPlainIsPinned"*) echo yes ;; *) echo "no: ${sh_detail:0:70}" ;; esac)"
+
+  # A build break must still report the compiler error, not be filtered away by
+  # a rule written for test output. The `# package` header stays dropped.
+  BROKE="$ROOT/detail-build"
+  mkdir -p "$BROKE"
+  make_repo "$BROKE/broken" -
+  printf 'package broken\n\nfunc Bad() int { return undefinedSymbol }\n' > "$BROKE/broken/b.go"
+  git -C "$BROKE/broken" add -A
+  git -C "$BROKE/broken" commit -qm broken
+  REPORTB="$ROOT/detail-build.json"
+  REPOS_DIR="$BROKE" REPORT="$REPORTB" bash "$AUDIT" >"$ROOT/detail-build.out" 2>&1
+  b_detail=$(report_field "$REPORTB" '([f["detail"] for f in d.get("failures") or []] or [""])[0]')
+  check "detail: a build break still reports its compiler error" \
+        "yes" \
+        "$(case "$b_detail" in *"undefinedSymbol"*) echo yes ;; *) echo "no: ${b_detail:0:70}" ;; esac)"
+  check "detail: a build break still drops go's '# package' header line" \
+        "yes" \
+        "$(case "$b_detail" in "#"*) echo "no: ${b_detail:0:70}" ;; *) echo yes ;; esac)"
+else
+  echo "SKIP  detail fixture (go is not on PATH)"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
