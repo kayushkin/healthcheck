@@ -34,25 +34,48 @@
 # ⚠️ The second half of that rationale used to read "several repos' suites need
 # live services or credentials, so gating on them would make the guard cry wolf
 # nightly". That claim was never measured, and on 2026-08-08 it was, by running
-# this guard with --with-tests across the whole fleet. It is FALSE:
+# this guard with --with-tests across the whole fleet. It is FALSE, and it is
+# still false — but the count moves, so the count is dated:
 #
-#   70 of 71 repos pass `go test ./...` from a clean clone of HEAD (430s total).
+#   2026-08-08   70 of 71 repos pass `go test ./...` from a clean clone of HEAD (430s)
+#   2026-08-31   71 of 75 repos pass `go test ./...` from a clean clone of HEAD (378s)
 #
-# Not one suite needs a live service or a credential. Every candidate turned out
-# to be a t.Skip on the unset env var (inber/agent, inber/conversation), a
-# //go:build integration tag that `go test ./...` never selects at all
-# (llm-bridge-hermes), an httptest fake, a port number asserted as a string
-# literal (forge, permission-store, redact), or a test written to tolerate the
-# service being absent (inber/server TestEventPublisherCreation).
+# ⚠️ Date the number and re-take it before quoting it. The 2026-08-08 line stood
+# for three weeks and went stale while every tree it described stood still: nobody
+# committed anything, but logstack's seedCorpus fixture is anchored to a wall-clock
+# date and its corpus left the query window on 2026-08-11. A green repo turned red
+# on its own, and in the direction that made this comment look safer than it was.
 #
-# The single red is argraphments, and it is a TRUE defect, not a wolf: three
-# tests assert on static/dist/index.html, which is gitignored and which nothing
-# in the committed tree builds. See noteboard for the measurement and the fork.
+# Not one suite needs a live service or a credential. That half of the 2026-08-08
+# finding still holds — re-run 2026-08-31, no repo failed for a missing service.
+# Every candidate turned out to be a t.Skip on the unset env var (inber/agent,
+# inber/conversation), a //go:build integration tag that `go test ./...` never
+# selects at all (llm-bridge-hermes), an httptest fake, a port number asserted as a
+# string literal (forge, permission-store, redact), or a test written to tolerate
+# the service being absent (inber/server TestEventPublisherCreation).
 #
-# So the exclusion now rests on ONE honest reason rather than two: turning this
-# on would paint the guard red until argraphments is fixed, and a guard everyone
-# has learned to ignore is worse than no guard at all. Fix that repo and the
-# cost of `stages+=(test)` by default is, as measured, zero red repos.
+# The four reds of 2026-08-31 are two different things, and only the first pair is
+# a broken tree:
+#
+#   A repo that does not pass its own tests
+#     argraphments   three tests assert on static/dist/index.html, which is
+#                    gitignored and which nothing in the committed tree builds.
+#                    The single red of 2026-08-08, still red.
+#     logstack       TestGroupOmitsRowsUnlessRequested, the aged-out fixture above.
+#                    Red on main since 2026-08-11.
+#
+#   This guard's own flags, not the repo's fault
+#     job-store      Both suites need `-tags sqlite_fts5` and say so in the failure
+#     quote-store    message. The stages below pass no build tags, so `go test ./...`
+#                    cannot open a database in either. Both are GREEN from a clean
+#                    clone of HEAD once the tag is passed — measured 2026-08-31 at
+#                    job-store 5bf43c3 and quote-store 5d0491c. Reading these two as
+#                    broken trees is the mistake this paragraph exists to stop.
+#
+# So "fix one repo and the cost of `stages+=(test)` by default is zero red repos" no
+# longer holds. As measured 2026-08-31 the cost is two repos to repair plus a way for
+# this script to learn a repo's build tags, which it has no notion of today. Whether
+# to turn `test` on by default is the user's call and this comment does not make it.
 #
 # Tier 2: --smoke
 # ---------------
@@ -299,7 +322,12 @@ while [ $# -gt 0 ]; do
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
-      sed -n '2,60p' "$0"; exit 0 ;;
+      # Print the header comment down to the line before the "Tier 2" section.
+      # Found rather than counted: the rationale above carries a dated measurement
+      # that gets rewritten whenever the sweep is re-taken, and a fixed line range
+      # starts cutting mid-sentence the first time that block grows. The old
+      # `2,60p` already did — it stopped four lines into Tier 2, mid-sentence.
+      awk 'NR==1 {next} /^# Tier 2: --smoke$/ {exit} {print}' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
