@@ -1711,26 +1711,37 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
     rc=$?
     if [ "$rc" -ne 0 ]; then
       status="fail"; stage="$s"
-      # `head -6` is right for build and vet, whose output STARTS with the error,
-      # and wrong for test, whose output starts with one line per PASSING package.
-      # Measured 2026-08-14 on a --with-tests sweep: two of the four red repos
-      # recorded detail "?" — the first six lines were
-      # `?   github.com/…/cmd/foo  [no test files]`, so the report described a
-      # failing repo with a list of its successes and named no failing test at all.
-      # A report that truncates to the happy path is worse than one that truncates
-      # at random: it reads as evidence that nothing is wrong.
+      # Read the failure AHEAD of the boilerplate, never from the head of the
+      # stream. `go test ./...` prints one line per package, so a repo with many
+      # packages emits dozens of `?  pkg [no test files]` and `ok  pkg` lines
+      # BEFORE the first `--- FAIL:` block, and `head -6` took those.
       #
-      # So for test, select the lines that CARRY the failure and fall back to the
-      # old behaviour if none match, which keeps a panic or a build error inside
-      # the test tree from producing an empty detail.
-      if [ "$s" = "test" ]; then
-        detail=$(echo "$STAGE_OUT" \
-          | grep -E '^(--- FAIL|FAIL|panic:|[[:space:]]+[^[:space:]]+_test\.go:)' \
-          | head -6 | tr '\n' ' ' | cut -c1-500)
-      fi
-      if [ "$s" != "test" ] || [ -z "$detail" ]; then
-        detail=$(echo "$STAGE_OUT" | grep -v '^#' | grep -v '^$' | head -6 | tr '\n' ' ' | cut -c1-500)
-      fi
+      # This is HALF the defect. The other half is in the report writer below
+      # (`"detail": "\t".join(rest)`), which used to keep only the detail's own
+      # first tab-separated field -- and go test output is tab-separated, so what
+      # actually reached the report was the four characters `?   `. Measured as a
+      # 2x2 over a fixture repo with eight silent packages and a failing test in
+      # a ninth: each fix is independently necessary and NEITHER IS SUFFICIENT.
+      # Repair one and the stored detail is still useless, in a different way.
+      #
+      # Measured over three stored fleet sweeps (2026-08-22, and both runs of
+      # 2026-08-31): 4 of 13 stage=test failures stored a detail naming no test.
+      # Deterministic, not flaky -- `logstack` has failed to name its test in
+      # every sweep since 2026-08-22 and `scheduler` does the same. Those are
+      # exactly the two repos with enough packages to push the FAIL past the cut.
+      #
+      # The selection rule here is the one the npm `check` stage above already
+      # states for itself -- "read ahead of npm's exit-code boilerplate, never
+      # from the tail". The Go stage never got it: one authoring, one copy short.
+      #
+      # The `grep -v '^#'` is kept: it drops go build's `# package/path` headers
+      # while the `.go:NN:` line under each one carries the actual error.
+      # Falls back to the old behaviour when nothing matches, so a stage that
+      # fails in a shape nobody anticipated still reports something, not nothing.
+      detail=$(echo "$STAGE_OUT" | grep -v '^#' \
+        | grep -E '\.go:[0-9]+:|^--- FAIL:|^FAIL[[:space:]]|^panic:' \
+        | head -6 | tr '\n' ' ' | cut -c1-500)
+      [ -z "$detail" ] && detail=$(echo "$STAGE_OUT" | grep -v '^#' | grep -v '^$' | head -6 | tr '\n' ' ' | cut -c1-500)
       [ "$rc" -eq 124 ] && detail="timed out after ${STAGE_TIMEOUT}s"
       break
     fi
@@ -1802,9 +1813,19 @@ for line in sys.stdin.read().splitlines():
     if not line.strip():
         continue
     name, status, stage, secs, *rest = line.split("\t")
+    # The detail is EVERYTHING after the fourth field, not the first field of it.
+    # `rest[0]` silently cut every detail at its first embedded tab -- and
+    # `go test ./...` output is tab-separated ("?\tpkg\t[no test files]"), so a
+    # red repo stored the four characters "?   " and nothing else. Measured: that
+    # is exactly what `logstack` stored in every fleet sweep since 2026-08-22,
+    # and `scheduler` in the sweeps of 2026-08-31.
+    #
+    # This is independent of which lines the detail is built from a few hundred
+    # lines above, and fixing only that one leaves this one live: a compiler
+    # error or a panic message carrying a tab would still be cut here.
     rows.append({
         "repo": name, "status": status, "stage": stage,
-        "seconds": int(secs), "detail": rest[0] if rest else "",
+        "seconds": int(secs), "detail": "\t".join(rest),
     })
 mode = os.environ["MODE"]
 report = {
