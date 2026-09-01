@@ -330,6 +330,75 @@ check "status: with the abort key gone the same report fails for another reason 
                        *) echo "no: $noabort_out" ;;
                      esac)"
 
+# --------------------------------------------------- fixture PARKED CHECKOUT
+# The 2026-08-31 llm-bridge-claudecode shape: a main clone left checked out on
+# a side branch that is missing commits from main, long enough that nobody is
+# plausibly mid-task. A hand build from that tree ships a regression, and one
+# did — the deploy sweep now reports the clone itself as `parked-stale` before
+# anything is built from it.
+#
+# Two repos, because the check has a boundary and only straddling it proves the
+# gate discriminates rather than firing on every non-default checkout:
+#   parked   — side branch CONTAINS all of main (nothing missing). Reported,
+#              never failed: it is a landmine only once main moves.
+#   parked-stale — side branch is MISSING a main commit and the last commit is
+#              older than the grace window. This is the failure.
+PARKDIR="$ROOT/parked"
+mkdir -p "$PARKDIR"
+OLD_DATE="2020-01-01T00:00:00Z"
+
+make_repo "$PARKDIR/gamma" -
+git -C "$PARKDIR/gamma" branch -m main 2>/dev/null || true
+git -C "$PARKDIR/gamma" checkout -qb side
+GIT_AUTHOR_DATE="$OLD_DATE" GIT_COMMITTER_DATE="$OLD_DATE" \
+  git -C "$PARKDIR/gamma" commit -qm "side work" --allow-empty
+git -C "$PARKDIR/gamma" checkout -q main
+git -C "$PARKDIR/gamma" commit -qm "landed on main after the fork" --allow-empty
+git -C "$PARKDIR/gamma" checkout -q side   # parked, missing 1, dated 2020
+
+make_repo "$PARKDIR/delta" -
+git -C "$PARKDIR/delta" branch -m main 2>/dev/null || true
+git -C "$PARKDIR/delta" checkout -qb side
+GIT_AUTHOR_DATE="$OLD_DATE" GIT_COMMITTER_DATE="$OLD_DATE" \
+  git -C "$PARKDIR/delta" commit -qm "side work containing all of main" --allow-empty
+# left parked on side: ahead of main, missing nothing
+
+mkdir -p "$ROOT/parked-nobin"
+REPOS_DIR="$PARKDIR" BIN_DIRS="$ROOT/parked-nobin" \
+  REPORT="$ROOT/deploy-parked.json" bash "$DEPLOY_AUDIT" >/dev/null 2>&1
+check "parked: a clone missing a main commit past the grace window is parked-stale" \
+      "parked-stale" \
+      "$(report_field "$ROOT/deploy-parked.json" '[p["status"] for p in d["parked_checkouts"] if p["repo"]=="gamma"][0]')"
+check "parked: it counts as a failure" \
+      "1" "$(report_field "$ROOT/deploy-parked.json" 'd["parked_failures"]')"
+check "parked: the row states how many default-branch commits the tree is missing" \
+      "1" "$(report_field "$ROOT/deploy-parked.json" '[p["missing_from_default"] for p in d["parked_checkouts"] if p["repo"]=="gamma"][0]')"
+check "parked: a side branch containing all of main is reported, never failed" \
+      "parked" \
+      "$(report_field "$ROOT/deploy-parked.json" '[p["status"] for p in d["parked_checkouts"] if p["repo"]=="delta"][0]')"
+
+# The reader names the finding. The fixture report identifies zero artifacts —
+# BIN_DIRS was empty — and the reader rightly refuses such a report before it
+# ever reads parked_checkouts, so the artifact counts are doctored to a
+# self-consistent minimum first. Doctoring is confined to the coverage triple;
+# the parked rows under test pass through untouched.
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["artifacts_total"] = 1
+d["executables_scanned"] = 1
+d["skipped_not_go"] = []
+json.dump(d, open(sys.argv[2], "w"), indent=2)
+' "$ROOT/deploy-parked.json" "$ROOT/deploy-parked-readable.json"
+parked_out=$(REPORT="$ROOT/deploy-parked-readable.json" bash "$HERE/repo-deploy-status.sh" 2>&1)
+parked_rc=$?
+check "status: a parked-stale clone fails BY NAME, with the repo and the missing count" \
+      "1 yes" \
+      "$parked_rc $(case "$parked_out" in
+                      *"parked on a side branch"*"gamma (on side, missing 1 from main)"*) echo yes ;;
+                      *) echo "no: $parked_out" ;;
+                    esac)"
+
 # ------------------------------------------------------------ fixture --only
 # --only writes the SAME report path as a full sweep, so a filtered run used to
 # be indistinguishable from a fleet one: `--only healthcheck` left repos_total=1,

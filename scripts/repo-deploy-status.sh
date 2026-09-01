@@ -89,6 +89,11 @@ if age_hours > max_age:
 
 stale = report.get("stale_running", [])
 wip = report.get("stale_wip", [])
+# Read with a default rather than refused: reports written before 2026-08-31
+# carry no parked_checkouts, and refusing them would silence every finding the
+# sweep does make until the nightly job next runs — the ghost_identity
+# precedent, same reasoning.
+parked = [p for p in report.get("parked_checkouts", []) if p.get("status") == "parked-stale"]
 ghosts = report.get("ghost_artifacts", [])
 total = report.get("artifacts_total", 0)
 thresholds = report.get("thresholds", {})
@@ -177,7 +182,7 @@ if stale:
     named = ", ".join([label(a) for a in worst])
     more = "" if len(stale) <= 4 else f" +{len(stale) - 4} more"
     problems.append(
-        f"{len(stale)} RUNNING binaries are stale vs their committed HEAD: {named}{more}"
+        f"{len(stale)} RUNNING binaries are stale vs their repo\u2019s default branch: {named}{more}"
     )
 
 if wip:
@@ -189,19 +194,39 @@ if wip:
         f"{len(wip)} repo(s) hold uncommitted tracked changes with no agent working on them: {named}{more}"
     )
 
+if parked:
+    # The 2026-08-31 llm-bridge-claudecode shape: a main clone parked on a side
+    # branch that is missing commits from the default branch, with nobody
+    # working in it. Any build-and-install from that tree ships a regression,
+    # and one did — see the sweep script for the incident. Named per repo with
+    # the missing-commit count, because the fix is one command in each:
+    # git -C ~/repos/<repo> checkout <default>.
+    named = ", ".join(
+        p.get("repo", "?") + " (on " + p.get("branch", "?") + ", missing "
+        + str(p.get("missing_from_default", 0)) + " from " + p.get("default_branch", "?") + ")"
+        for p in parked[:4]
+    )
+    more = "" if len(parked) <= 4 else f" +{len(parked) - 4} more"
+    problems.append(
+        f"{len(parked)} main clone(s) are parked on a side branch missing default-branch commits "
+        f"— builds from those trees ship regressions: {named}{more}"
+    )
+
 if problems:
     print("FAIL: " + "; ".join(problems))
     sys.exit(1)
 
 ghost_note = f", {len(ghosts)} ghost artifact(s)" if ghosts else ""
+parked_all = report.get("parked_checkouts", [])
+parked_note = f", {len(parked_all)} clone(s) parked off their default branch" if parked_all else ""
 max_behind = thresholds["max_behind"]
 # The coverage figure is printed, not merely reconciled. The identity above
 # proves the numbers add up; it cannot tell that 76 was 77 last night. Putting
 # both halves on the line a human actually reads is what makes an artifact
 # silently leaving the sweep look different from a clean fleet.
 print(
-    f"ok: all {total} deployed artifacts match their committed HEAD within "
-    f"{max_behind} commits{ghost_note} "
+    f"ok: all {total} deployed artifacts match their repo\u2019s default branch within "
+    f"{max_behind} commits{ghost_note}{parked_note} "
     f"({total} of {scanned} executables scanned are Go binaries, "
     f"checked {age_hours:.1f}h ago)"
 )
