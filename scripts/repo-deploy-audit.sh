@@ -186,6 +186,7 @@ with open(os.environ["REPORT"], "w") as fh:
         "drift_failures": 0,
         "wip_failures": 0,
         "stale_running": [], "behind": [], "ghost_artifacts": [],
+        "parked_checkouts": [], "parked_failures": 0,
         "stale_wip": [], "artifacts": [], "worktrees": [],
     }, fh, indent=2)
     fh.write("\n")
@@ -302,6 +303,47 @@ for d in $BIN_DIRS; do
 done
 candidates="$(printf '%s%s' "$candidates" "$running_bins" | sort -u | sed '/^$/d')"
 
+# default_branch_ref <repo_path> — the ref drift is measured AGAINST.
+#
+# Until 2026-08-31 that ref was HEAD, and HEAD is whatever branch the last agent
+# left checked out. That is the blind spot that shipped a regression: the
+# llm-bridge-claudecode clone sat parked on a side branch forked BEFORE main
+# gained the 2026-08-11 unprompted-turn fix, an agent hand-built and installed
+# from the tree, and this guard read the binary as 0 behind — 0 behind the very
+# stale branch it was built from. Measured that night: 0 behind HEAD, 4 behind
+# main, and the missing commits included the fix users then re-hit all
+# afternoon.
+#
+# So drift is measured against the repo's DEFAULT branch. Resolution order,
+# each step taken only when the previous one names nothing (a resolution of one
+# canonical ref, not a fallback chain inventing a value):
+#   1. the branch origin/HEAD names — as a local ref if present, else the
+#      remote-tracking ref;
+#   2. a local `main`, then a local `master` — for the repos with no origin
+#      remote at all (job-store, quote-store, prediction-store);
+#   3. HEAD, the old behaviour, for a repo where none of those exist — and the
+#      row says so, because the point is knowing which yardstick was used.
+# Prints "<ref> <display name>" (space-separated; refs contain no spaces).
+default_branch_ref() {
+  local p="$1" name
+  name="$(git -C "$p" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)"
+  name="${name#origin/}"
+  if [ -n "$name" ]; then
+    if git -C "$p" rev-parse --verify --quiet "refs/heads/$name" >/dev/null; then
+      echo "refs/heads/$name $name"; return
+    fi
+    if git -C "$p" rev-parse --verify --quiet "refs/remotes/origin/$name" >/dev/null; then
+      echo "refs/remotes/origin/$name origin/$name"; return
+    fi
+  fi
+  for name in main master; do
+    if git -C "$p" rev-parse --verify --quiet "refs/heads/$name" >/dev/null; then
+      echo "refs/heads/$name $name"; return
+    fi
+  done
+  echo "HEAD HEAD"
+}
+
 rows=""
 drift_fail=0
 
@@ -383,15 +425,18 @@ while IFS= read -r bin; do
     continue
   fi
 
-  behind="$(git -C "$repo_path" rev-list --count "$rev"..HEAD 2>/dev/null || echo 0)"
+  base_line="$(default_branch_ref "$repo_path")"
+  base_ref="${base_line%% *}"
+  base_name="${base_line#* }"
+  behind="$(git -C "$repo_path" rev-list --count "$rev".."$base_ref" 2>/dev/null || echo 0)"
   detail=""
   status=ok
 
   if [ "$behind" -gt 0 ]; then
-    oldest_epoch="$(git -C "$repo_path" log --format=%ct --reverse "$rev"..HEAD 2>/dev/null | head -1)"
+    oldest_epoch="$(git -C "$repo_path" log --format=%ct --reverse "$rev".."$base_ref" 2>/dev/null | head -1)"
     age_days=0
     [ -n "$oldest_epoch" ] && age_days=$(( ( $(date +%s) - oldest_epoch ) / 86400 ))
-    detail="$behind commit(s) behind HEAD; oldest undeployed is ${age_days}d old"
+    detail="$behind commit(s) behind $base_name; oldest undeployed is ${age_days}d old"
     status=behind
     if [ "$behind" -ge "$MAX_BEHIND" ] || [ "$age_days" -ge "$MAX_BEHIND_DAYS" ]; then
       status=stale
@@ -524,15 +569,70 @@ for repo_path in "$REPOS_DIR"/*; do
 done
 
 # ---------------------------------------------------------------------------
+# 3b. Main clones parked off their default branch.
+# ---------------------------------------------------------------------------
+# The state that armed the 2026-08-31 llm-bridge-claudecode regression, checked
+# directly rather than only through the binaries it eventually taints. A nightly
+# agent checks a fix branch out IN THE MAIN CLONE, commits, and walks away; the
+# clone then sits on that branch — measured that night: 42 of 83 clones — and
+# every later `cd <repo> && go build` builds a tree that may be missing weeks of
+# main. The drift check above catches the binary AFTER such a build is deployed;
+# this catches the loaded gun before anything is built from it.
+#
+# A parked clone FAILS only when all three hold:
+#   - its HEAD is missing commits the default branch has (`missing` > 0) — a
+#     parked branch that contains all of the default is a landmine only once
+#     the default moves, so it is reported but not failed;
+#   - no active agent session has the repo as its working directory;
+#   - the parked branch's last commit is older than PARKED_GRACE_HOURS — a
+#     branch an agent committed to this afternoon is work in progress, not an
+#     abandonment, even though the session that made it has ended.
+parked_rows=""
+parked_fail=0
+PARKED_GRACE_HOURS="${PARKED_GRACE_HOURS:-24}"
+
+for repo_path in "$REPOS_DIR"/*; do
+  [ -d "$repo_path/.git" ] || continue
+  repo="$(basename "$repo_path")"
+
+  current="$(git -C "$repo_path" branch --show-current 2>/dev/null)"
+  base_line="$(default_branch_ref "$repo_path")"
+  base_ref="${base_line%% *}"
+  base_name="${base_line#* }"
+
+  # Detached HEAD ("" from --show-current) counts as parked too: a build from a
+  # detached tree is just as untethered from main as one from a side branch.
+  [ "$base_ref" = "HEAD" ] && continue   # no yardstick — nothing to compare against
+  [ "$current" = "$base_name" ] && continue
+
+  missing="$(git -C "$repo_path" rev-list --count HEAD.."$base_ref" 2>/dev/null || echo 0)"
+  last_commit_epoch="$(git -C "$repo_path" log -1 --format=%ct 2>/dev/null || echo 0)"
+  parked_hours=$(( ( $(date +%s) - last_commit_epoch ) / 3600 ))
+
+  live=false
+  repo_has_active_session "$repo_path" && live=true
+
+  status=parked
+  if [ "$missing" -gt 0 ] && [ "$live" = false ] && [ "$parked_hours" -ge "$PARKED_GRACE_HOURS" ]; then
+    status=parked-stale
+    parked_fail=$((parked_fail + 1))
+  fi
+
+  parked_rows="$parked_rows$repo	${current:-<detached>}	$base_name	$missing	$parked_hours	$live	$status"$'\n'
+done
+
+# ---------------------------------------------------------------------------
 # 4. Report.
 # ---------------------------------------------------------------------------
 finished_epoch="$(date +%s)"
 
 DRIFT_ROWS="$rows" WIP_ROWS="$wip_rows" GHOSTS="$ghosts" \
+PARKED_ROWS="$parked_rows" PARKED_FAIL="$parked_fail" \
 GHOST_IDENTITY_FROM_FILENAME="$ghost_identity_from_filename" \
 STARTED_AT="$started_at" \
 MAX_BEHIND="$MAX_BEHIND" MAX_BEHIND_DAYS="$MAX_BEHIND_DAYS" STALE_WIP_HOURS="$STALE_WIP_HOURS" \
 DRIFT_FAIL="$drift_fail" WIP_FAIL="$wip_fail" REPORT="$REPORT" \
+PARKED_GRACE_HOURS="$PARKED_GRACE_HOURS" \
 EXECUTABLES_SCANNED="$executables_scanned" \
 SKIPPED_NOT_GO="$(printf '%s\n' ${skipped_not_go+"${skipped_not_go[@]}"})" \
 python3 -c '
@@ -555,6 +655,11 @@ for d in drift:
     d["behind"] = int(d["behind"] or 0)
 
 wip = rows("WIP_ROWS", ["repo", "status", "tracked_dirty", "untracked", "age_hours", "agent_active"])
+parked = rows("PARKED_ROWS", ["repo", "branch", "default_branch", "missing_from_default", "parked_hours", "agent_active", "status"])
+for row in parked:
+    row["agent_active"] = row["agent_active"] == "true"
+    for k in ("missing_from_default", "parked_hours"):
+        row[k] = int(row[k] or 0)
 for w in wip:
     w["agent_active"] = w["agent_active"] == "true"
     for k in ("tracked_dirty", "untracked", "age_hours"):
@@ -582,6 +687,7 @@ report = {
         "max_behind": int(os.environ["MAX_BEHIND"]),
         "max_behind_days": int(os.environ["MAX_BEHIND_DAYS"]),
         "stale_wip_hours": int(os.environ["STALE_WIP_HOURS"]),
+        "parked_grace_hours": int(os.environ["PARKED_GRACE_HOURS"]),
     },
     # The coverage pair. `executables_scanned` is every candidate the drift loop
     # considered; `artifacts_total` is how many of them were Go binaries it could
@@ -610,6 +716,13 @@ report = {
     # string, and the header says so 500 lines above where you are reading.)
     "ghost_identity_from_filename": ghost_identity_from_filename,
     "stale_wip": [w for w in wip if w["status"] == "stale-wip"],
+    # Main clones checked out on something other than their default branch. A
+    # parked-stale row is a clone that would BUILD A REGRESSION today: its HEAD
+    # is missing commits from the default branch, nobody is working in it, and
+    # it has sat that way past the grace window. The 2026-08-31
+    # llm-bridge-claudecode incident is the row shape this exists to catch.
+    "parked_checkouts": parked,
+    "parked_failures": int(os.environ["PARKED_FAIL"]),
     "artifacts": drift,
     "worktrees": wip,
 }
@@ -619,7 +732,7 @@ with open(os.environ["REPORT"], "w") as fh:
 '
 
 echo
-echo "deployed artifacts: $(printf '%s' "$rows" | grep -c . || true) of $executables_scanned executables scanned (${#skipped_not_go[@]} not Go)   drift failures: $drift_fail   stale WIP: $wip_fail   ($(( finished_epoch - $(date -d "$started_at" +%s) ))s)"
+echo "deployed artifacts: $(printf '%s' "$rows" | grep -c . || true) of $executables_scanned executables scanned (${#skipped_not_go[@]} not Go)   drift failures: $drift_fail   stale WIP: $wip_fail   parked clones: $parked_fail   ($(( finished_epoch - $(date -d "$started_at" +%s) ))s)"
 echo "report: $REPORT"
 
-[ "$drift_fail" -eq 0 ] && [ "$wip_fail" -eq 0 ]
+[ "$drift_fail" -eq 0 ] && [ "$wip_fail" -eq 0 ] && [ "$parked_fail" -eq 0 ]
