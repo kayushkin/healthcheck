@@ -28,7 +28,7 @@
 #      silently dropped on decode ever since.
 #
 #   2. bridge-agent exposes a free-text -purpose flag, so agents wrote
-#      descriptions into it: "dashv2 browser verification + A/B perf",
+#      descriptions into it: "browser verification + A/B perf",
 #      "waitwell-dmv-api-recon", "harness-session-id smoke". A vocabulary of
 #      slugs turned into a column of one-off sentences that nothing can
 #      group or filter.
