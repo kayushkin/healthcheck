@@ -397,3 +397,15 @@ services:
     unit: argraphments
     system_unit: true
     auto_restart: true
+
+  # Process-pileup guard. Goes DOWN when the host accumulates processes — the shape
+  # that OOM'd the box 2026-09-04, when a runaway sabotage scorer left 1,688 orphaned
+  # python3 interpreters (~10 GB) each too small for the OOM killer to target. The
+  # `memory` resource check above watched the symptom and reported 95% for three days
+  # while nothing acted; this watches the cause. Deliberately NO cc_agent and NO
+  # auto_restart: it only alerts. Spawning a Claude Code process on a process-starved
+  # box is exactly what amplified the original incident.
+  - name: process-count-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/process-count-status.sh"]
+    expect_output: "ok"
