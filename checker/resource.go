@@ -45,12 +45,28 @@ type ResourceState struct {
 	LastCCAgentAt     time.Time `json:"last_cc_agent_at,omitempty"`
 	CCAgentAttempts   int       `json:"cc_agent_attempts,omitempty"`
 	CCAgentGaveUp     bool      `json:"cc_agent_gave_up,omitempty"`
+	// UnderThresholdSince is when the resource last went from breached to
+	// measured-under-threshold and has stayed there. The cc-agent counters
+	// above are cleared only once this has lasted ccAgentResetAfterHealthyFor.
+	//
+	// They used to clear on ANY single sample under the threshold. Memory
+	// hovering at 90-92% on 2026-09-04/05 flapped across the line every few
+	// minutes, and each dip wiped both the attempt count and the cooldown, so
+	// the "3 attempts, 30 minutes apart" cap never bound: 16 remediation
+	// agents were spawned, some 10 minutes apart, onto a box with 0.5 GB free
+	// — each one a Claude Code process, each one making the shortage worse.
+	// Recovery has to be sustained before it earns the counters back.
+	UnderThresholdSince time.Time `json:"under_threshold_since,omitempty"`
 }
 
 const (
 	ccAgentCooldown         = 30 * time.Minute
 	persistentAlertInterval = 15 * time.Minute
 	maxCCAgentAttempts      = 3
+	// How long a resource must stay measured-under-threshold before the
+	// cc-agent attempt count and cooldown are forgiven. See
+	// ResourceState.UnderThresholdSince for the flap this closes.
+	ccAgentResetAfterHealthyFor = 30 * time.Minute
 )
 
 func (c *Checker) GetResourceStates() []ResourceState {
@@ -75,24 +91,26 @@ func (c *Checker) checkAllResources() {
 	wg.Wait()
 }
 
-func (c *Checker) checkResource(res ResourceConfig) {
-	var usagePct float64
-	var detail string
-	var checkErr error
-
+// measureResourceUsage is the production measurement behind Checker.measureResource.
+func measureResourceUsage(res ResourceConfig) (float64, string, error) {
 	switch res.Type {
 	case "disk":
-		usagePct, detail, checkErr = checkDisk(res.Path)
+		return checkDisk(res.Path)
 	case "memory":
-		usagePct, detail, checkErr = checkMemory()
+		return checkMemory()
 	default:
-		checkErr = fmt.Errorf("unknown resource type: %s", res.Type)
+		return 0, "", fmt.Errorf("unknown resource type: %s", res.Type)
 	}
+}
+
+func (c *Checker) checkResource(res ResourceConfig) {
+	usagePct, detail, checkErr := c.measureResource(res)
+	now := c.now()
 
 	c.mu.Lock()
 	state := c.resourceStates[res.Name]
 	oldStatus := state.Status
-	state.LastCheck = time.Now()
+	state.LastCheck = now
 
 	if checkErr != nil {
 		// We failed to MEASURE. That is a broken check, not a breached
@@ -102,12 +120,16 @@ func (c *Checker) checkResource(res ResourceConfig) {
 		state.LastError = checkErr.Error()
 		state.Status = StatusDown
 		state.ThresholdBreached = false
+		// Nothing was measured, so nothing was measured healthy: a recovery
+		// window cannot be built out of readings we do not have.
+		state.UnderThresholdSince = time.Time{}
 	} else {
 		state.UsagePct = usagePct
 		state.Detail = detail
 		if usagePct >= res.Threshold {
 			state.ConsecutiveFails++
 			state.ThresholdBreached = true
+			state.UnderThresholdSince = time.Time{}
 			state.LastError = fmt.Sprintf("usage %.1f%% exceeds threshold %.1f%%", usagePct, res.Threshold)
 			if state.ConsecutiveFails >= c.config.AlertThreshold {
 				state.Status = StatusDown
@@ -119,11 +141,13 @@ func (c *Checker) checkResource(res ResourceConfig) {
 			state.ThresholdBreached = false
 			state.Status = StatusUp
 			state.LastError = ""
+			if state.UnderThresholdSince.IsZero() {
+				state.UnderThresholdSince = now
+			}
 		}
 	}
 
 	newStatus := state.Status
-	now := time.Now()
 
 	firePersistent := false
 	spawnAgent := false
@@ -151,9 +175,20 @@ func (c *Checker) checkResource(res ResourceConfig) {
 		}
 	} else {
 		state.LastAlertAt = time.Time{}
-		state.LastCCAgentAt = time.Time{}
-		state.CCAgentAttempts = 0
-		state.CCAgentGaveUp = false
+		// The cc-agent counters survive a dip. They are forgiven only after
+		// the resource has been measured under its threshold continuously
+		// for ccAgentResetAfterHealthyFor — a single good sample between two
+		// bad ones is a flap, not a recovery, and treating it as one is how
+		// the 3-attempt cap spawned 16 agents on 2026-09-05.
+		healthyFor := time.Duration(0)
+		if !state.UnderThresholdSince.IsZero() {
+			healthyFor = now.Sub(state.UnderThresholdSince)
+		}
+		if healthyFor >= ccAgentResetAfterHealthyFor {
+			state.LastCCAgentAt = time.Time{}
+			state.CCAgentAttempts = 0
+			state.CCAgentGaveUp = false
+		}
 	}
 	stateCopy := *state
 	c.mu.Unlock()

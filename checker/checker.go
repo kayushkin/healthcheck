@@ -15,10 +15,10 @@ import (
 type Status string
 
 const (
-	StatusUp      Status = "up"
-	StatusDown    Status = "down"
+	StatusUp       Status = "up"
+	StatusDown     Status = "down"
 	StatusDegraded Status = "degraded"
-	StatusUnknown Status = "unknown"
+	StatusUnknown  Status = "unknown"
 	// StatusMisconfigured means the check itself is wrong — it is watching
 	// something that does not exist — so it reports nothing about the service.
 	// Distinct from StatusDown ("the service is not running"), because the two
@@ -79,17 +79,17 @@ func (e *UnitNotFoundError) Error() string {
 }
 
 type ServiceState struct {
-	Name              string    `json:"name"`
-	Type              string    `json:"type"`
-	Status            Status    `json:"status"`
-	ResponseMs        int64     `json:"response_ms"`
-	LastCheck         time.Time `json:"last_check"`
-	ConsecutiveFails  int       `json:"consecutive_failures"`
-	UptimePct24h      float64   `json:"uptime_pct_24h"`
-	Version           string    `json:"version,omitempty"`
-	VersionDrift      int       `json:"version_drift,omitempty"`
-	LastError         string    `json:"last_error,omitempty"`
-	EnabledState      string    `json:"enabled_state,omitempty"` // systemctl is-enabled output (only set for type=systemd)
+	Name             string    `json:"name"`
+	Type             string    `json:"type"`
+	Status           Status    `json:"status"`
+	ResponseMs       int64     `json:"response_ms"`
+	LastCheck        time.Time `json:"last_check"`
+	ConsecutiveFails int       `json:"consecutive_failures"`
+	UptimePct24h     float64   `json:"uptime_pct_24h"`
+	Version          string    `json:"version,omitempty"`
+	VersionDrift     int       `json:"version_drift,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
+	EnabledState     string    `json:"enabled_state,omitempty"` // systemctl is-enabled output (only set for type=systemd)
 	// RestartAttempts counts auto_restart attempts since the service last
 	// recovered. RestartSuppressed means that count hit
 	// maxConsecutiveAutoRestarts and healthcheck has stopped trying, so a
@@ -139,14 +139,23 @@ type Checker struct {
 	onRestart          func(name string, success bool, err error)
 	onPersistentAlert  func(name string, state ResourceState)
 	onCCAgentExhausted func(name string, state ResourceState)
+
+	// measureResource and now are seams: production reads df/free and the
+	// wall clock; a test drives a resource across the threshold and through
+	// time without a real disk or a 30-minute sleep. Same pattern as
+	// enableUnit / isEnabled below.
+	measureResource func(res ResourceConfig) (usagePct float64, detail string, err error)
+	now             func() time.Time
 }
 
 func New(cfg *Config) *Checker {
 	c := &Checker{
-		config:         cfg,
-		states:         make(map[string]*ServiceState),
-		resourceStates: make(map[string]*ResourceState),
-		history:        make(map[string][]uptimeRecord),
+		config:          cfg,
+		states:          make(map[string]*ServiceState),
+		resourceStates:  make(map[string]*ResourceState),
+		history:         make(map[string][]uptimeRecord),
+		measureResource: measureResourceUsage,
+		now:             time.Now,
 	}
 	for _, svc := range cfg.Services {
 		c.states[svc.Name] = &ServiceState{

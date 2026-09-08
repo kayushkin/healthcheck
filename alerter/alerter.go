@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -38,6 +39,13 @@ func New(logFile, natsURL, llmBridgeURL string) (*Alerter, error) {
 		llmBridgeURL: llmBridgeURL,
 	}
 	if logFile != "" {
+		// The log used to live in /tmp, which this host clears at boot: the
+		// 2026-09-07 reboot destroyed four days of memory alerts, the only
+		// record of what healthcheck had been saying while the box filled.
+		// It now lives under ~/.local/state, so the directory has to exist.
+		if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
+			return nil, fmt.Errorf("create log directory for %s: %w", logFile, err)
+		}
 		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("open log file: %w", err)

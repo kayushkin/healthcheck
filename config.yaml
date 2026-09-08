@@ -1,7 +1,9 @@
 check_interval: 60s
 alert_threshold: 3
 listen_addr: ":8099"
-log_file: "/tmp/healthcheck-alerts.log"
+# Not /tmp: this host clears /tmp at boot, and the 2026-09-07 reboot took four days
+# of alert history with it. The alerter creates the directory.
+log_file: "/home/kayushkincom/.local/state/healthcheck/alerts.log"
 nats_url: "nats://localhost:4222"
 llm_bridge_url: "http://localhost:8160"
 
