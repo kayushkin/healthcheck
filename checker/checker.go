@@ -140,10 +140,21 @@ type Checker struct {
 	onPersistentAlert  func(name string, state ResourceState)
 	onCCAgentExhausted func(name string, state ResourceState)
 
+	// enableUnit performs the `systemctl enable`. It exists so a test can assert
+	// which checks reach it without a real unit being enabled as a side effect;
+	// nil means the real one.
+	enableUnit func(svc ServiceConfig) (string, error)
+
+	// isEnabled reads the unit's enablement state. Substitutable for the same
+	// reason: the only input that reaches the auto-enable decision is a unit
+	// systemd reports "disabled", and a test cannot produce one without either
+	// disabling a real unit or being unable to fail. nil means the real probe.
+	isEnabled func(svc ServiceConfig) string
+
 	// measureResource and now are seams: production reads df/free and the
 	// wall clock; a test drives a resource across the threshold and through
 	// time without a real disk or a 30-minute sleep. Same pattern as
-	// enableUnit / isEnabled below.
+	// enableUnit / isEnabled above.
 	measureResource func(res ResourceConfig) (usagePct float64, detail string, err error)
 	now             func() time.Time
 }
@@ -241,7 +252,11 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		checkErr = c.checkHTTP(svc)
 	case "systemd":
 		checkErr = c.checkSystemd(svc)
-		enabledState = systemdIsEnabled(svc)
+		probe := c.isEnabled
+		if probe == nil {
+			probe = systemdIsEnabled
+		}
+		enabledState = probe(svc)
 	case "command":
 		checkErr = c.checkCommand(svc)
 	default:
@@ -350,13 +365,38 @@ func (c *Checker) checkService(svc ServiceConfig) {
 		}
 	}
 
-	// Registry is the source of truth: a service listed here is one we want
-	// running at boot. If systemd reports it disabled, enable it now so it
-	// auto-starts on next reboot. (Does not start the service — restart is
-	// already handled by AutoRestart on a separate signal.)
-	if svc.Type == "systemd" && enabledState == "disabled" {
+	if shouldEnsureEnabled(svc, enabledState, misconfigured) {
 		go c.ensureEnabled(svc)
 	}
+}
+
+// shouldEnsureEnabled decides whether to write systemd state for this check.
+//
+// Registry is the source of truth: a service listed here is one we want running
+// at boot, so if systemd reports it disabled we enable it and it auto-starts on
+// the next reboot. (This does not start the service — that is AutoRestart, on a
+// separate signal.)
+//
+// A misconfigured check is excluded for the same reason it cannot drive a
+// restart: the check is wrong, so nothing it says about its unit is worth acting
+// on. That exclusion is not theoretical, and the case that reaches it is not the
+// one it sounds like. Measured on this host:
+//
+//	unit does not exist       show -> "not-found"  is-enabled -> "not-found"
+//	unit: "noteboard.service" show -> "not-found"  is-enabled -> "enabled"
+//	unit: "noteboard"         show -> "loaded"     is-enabled -> "enabled"
+//
+// checkSystemd probes svc.Unit+".service" and systemdIsEnabled probes svc.Unit
+// bare, so the two disagree whenever the configured name already carries the
+// suffix: "noteboard.service" makes checkSystemd ask about
+// "noteboard.service.service" and get not-found, while is-enabled resolves the
+// real unit. A plain phantom is therefore never enabled — is-enabled answers
+// "not-found", not "disabled" — but a check written with the suffix against a
+// disabled unit IS misconfigured and WOULD be enabled, and that unit is real.
+// So the write this guard prevents lands on a live unit, off a check that is
+// watching nothing and is reporting "misconfigured" while it happens.
+func shouldEnsureEnabled(svc ServiceConfig, enabledState string, misconfigured bool) bool {
+	return svc.Type == "systemd" && !misconfigured && enabledState == "disabled"
 }
 
 func (c *Checker) checkHTTP(svc ServiceConfig) error {
@@ -409,7 +449,10 @@ func (c *Checker) checkSystemd(svc ServiceConfig) error {
 }
 
 // systemdIsEnabled returns the raw `systemctl is-enabled` output (e.g.
-// "enabled", "disabled", "static", "masked"). Empty string on lookup error.
+// "enabled", "disabled", "static", "masked"). A unit that does not exist is
+// "not-found" — systemd prints that on stdout and exits 4, so it arrives here
+// like any other state rather than as the empty string. Empty string means the
+// probe itself could not answer: no output at all, e.g. an unreachable manager.
 func systemdIsEnabled(svc ServiceConfig) string {
 	args := systemctlArgs(svc, "is-enabled", svc.Unit)
 	cmd := exec.Command("systemctl", args...)
@@ -421,15 +464,24 @@ func systemdIsEnabled(svc ServiceConfig) string {
 // is currently disabled. Logs loudly on failure so a permission/path issue
 // surfaces in journalctl instead of silently leaving the service unbootable.
 func (c *Checker) ensureEnabled(svc ServiceConfig) {
-	args := systemctlArgs(svc, "enable", svc.Unit)
-	cmd := exec.Command("systemctl", args...)
-	out, err := cmd.CombinedOutput()
+	enable := c.enableUnit
+	if enable == nil {
+		enable = runSystemctlEnable
+	}
+	out, err := enable(svc)
 	if err != nil {
 		log.Printf("auto-enable failed for %s (unit=%s system=%v): %v: %s",
-			svc.Name, svc.Unit, svc.SystemUnit, err, strings.TrimSpace(string(out)))
+			svc.Name, svc.Unit, svc.SystemUnit, err, strings.TrimSpace(out))
 		return
 	}
 	log.Printf("auto-enabled %s (unit=%s system=%v)", svc.Name, svc.Unit, svc.SystemUnit)
+}
+
+// runSystemctlEnable is the real enable action ensureEnabled uses in production.
+func runSystemctlEnable(svc ServiceConfig) (string, error) {
+	args := systemctlArgs(svc, "enable", svc.Unit)
+	out, err := exec.Command("systemctl", args...).CombinedOutput()
+	return string(out), err
 }
 
 func systemctlArgs(svc ServiceConfig, verb, unit string) []string {

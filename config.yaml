@@ -115,6 +115,11 @@ services:
     unit: quote-store
     auto_restart: true
 
+  - name: prediction-store
+    type: systemd
+    unit: prediction-store
+    auto_restart: true
+
   - name: producer
     type: systemd
     unit: producer
