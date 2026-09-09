@@ -243,7 +243,7 @@ services:
   # site's frontend was reproducible on exactly one machine on earth.
   #
   # Also asserts something the Go pass has no equivalent for: bridge-ui, dash,
-  # kayushkin.com COMMITS their build output and serve it directly,
+  # kayushkin.com COMMITS its build output and serves it directly,
   # so a bundle that no longer matches its source is stale JavaScript shipped to
   # real users from a tree whose git status is clean. After building the committed
   # source in a pristine clone, the clone must still be pristine.
