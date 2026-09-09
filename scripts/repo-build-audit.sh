@@ -512,33 +512,10 @@ smoke_status() {
   esac
 }
 
-# is_linked_worktree <dir> — is this directory a second checkout of a repository
-# the sweep already walks, rather than a repository of its own?
-#
-# `git worktree add` is the workflow this box's own todos prescribe ("work from a
-# worktree off origin/main"), and workers make those worktrees as siblings under
-# ~/repos. A linked worktree answers `rev-parse --git-dir` exactly like a real
-# repository, so every loop below counted one as an extra repo: the Go and ELF
-# passes built and scanned the same tree twice, and the smoke pass did worse. A
-# worktree ships its parent's committed smoke, so the derived port registry saw
-# two claims on one number and check_port_collisions aborted the WHOLE sweep
-# before a single smoke booted.
-#
-# That is not a hypothetical. On 2026-08-01 a worker left
-# ~/repos/llm-bridge-server-workdir behind; the 03:30 run died in one second, all
-# 61 smokes went unrun, and smoke-report.json kept the previous night's verdict —
-# so the guard read green for another day while measuring nothing. The guard's
-# own recommended workflow switched the guard off.
-#
-# The test is git's own and never looks at the directory's name: in a linked
-# worktree the per-worktree git dir (<repo>/.git/worktrees/<name>) differs from
-# the repository's common dir; in a main checkout the two are the same path.
-is_linked_worktree() {
-  local dir="$1" gitdir common
-  gitdir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  [ "$gitdir" != "$common" ]
-}
+# is_linked_worktree lives in lib/git-worktree.sh — `fleet-suffix-cut-scan.sh` asks
+# the same question and there must be one answer to it. The reasoning that used to
+# sit here, including the 2026-08-01 incident, moved with the function.
+. "$(dirname "${BASH_SOURCE[0]}")/lib/git-worktree.sh"
 
 # check_port_collisions — no two smokes may declare the same default port.
 #
