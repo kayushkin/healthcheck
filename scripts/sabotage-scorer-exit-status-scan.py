@@ -80,6 +80,24 @@ a repo whose engine differs between two refs to hold that.
 
 Exit 0 when every (ref, scorer) pair is sound, 1 when any is broken or unknown.
 It reports; it changes nothing.
+
+## It takes no tree hold, and that is a measurement rather than an omission
+
+Card `ec8921ef` listed this file among the sabotage engines still needing
+`tree_hold` wired into `main`. It does not need one. Every write it makes goes
+inside a `tempfile.TemporaryDirectory()` built for its own `--self-test`; the only
+thing it does to a repository under ~/repos is read refs with `git ls-tree` and
+`git -C <repo> ...`. Nothing here mutates a working tree, and no verdict here is
+read off a suite's exit code, so there is no shared signal for a concurrent run to
+corrupt.
+
+The rollout census reports this file as an ENGINE because it greps for `open(...,
+"w")` and `subprocess.run` and cannot tell a write into a repository from a write
+into a scratch directory. That is the census being imprecise, not this file being
+unwired. **Taking a hold here would be worse than not taking one:** it would block
+real scorers on a tree this script never touches, and it would put a lock on
+`~/repos` — which is not a git repository — or on whichever tree the walk happened
+to land on.
 """
 
 import argparse
