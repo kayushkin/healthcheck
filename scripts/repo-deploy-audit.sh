@@ -346,6 +346,8 @@ default_branch_ref() {
 
 rows=""
 drift_fail=0
+regression_fail=0
+regression_lines=""
 
 # Coverage accounting. `artifacts_total` is not the number of executables this
 # sweep looked at — it is what survived the "is this Go?" filter, and until
@@ -428,6 +430,7 @@ while IFS= read -r bin; do
   base_line="$(default_branch_ref "$repo_path")"
   base_ref="${base_line%% *}"
   base_name="${base_line#* }"
+  rev_short="${rev:0:7}"
   behind="$(git -C "$repo_path" rev-list --count "$rev".."$base_ref" 2>/dev/null || echo 0)"
   detail=""
   status=ok
@@ -441,6 +444,27 @@ while IFS= read -r bin; do
     if [ "$behind" -ge "$MAX_BEHIND" ] || [ "$age_days" -ge "$MAX_BEHIND_DAYS" ]; then
       status=stale
       [ "$running" = true ] && drift_fail=$((drift_fail + 1))
+    fi
+  fi
+  # REGRESSION CLASS — a running binary that was NOT BUILT FROM ITS DEFAULT
+  # BRANCH: its commit is not an ancestor of main (a side-branch build), or it
+  # was built dirty (vcs.modified=true, so its commit names only what it was
+  # built NEAR). That is the shape of 2026-08-31 / 09-01 (a parked branch forked
+  # before main's fix) and of the harness that ran a dirty feature-branch build
+  # from 2026-09-02 to 09-10. It is NOT "behind main": nightly workers commit
+  # scripts to every trunk daily, so being behind is the fleet's resting state
+  # (20 of 26 running binaries the morning this was written) and a class that
+  # red every day is one nobody reads. Counted separately, exits separately
+  # (3), named on stdout, and carried as ONE standing noteboard todo.
+  if [ "$running" = true ]; then
+    on_default=true
+    git -C "$repo_path" merge-base --is-ancestor "$rev" "$base_ref" 2>/dev/null || on_default=false
+    if [ "$on_default" = false ] || [ "$dirty" = true ]; then
+      regression_fail=$((regression_fail + 1))
+      why=""
+      [ "$on_default" = false ] && why="built from $rev_short, which is NOT on $base_name (a side-branch build)"
+      [ "$dirty" = true ] && why="${why:+$why; }built DIRTY (vcs.modified=true — $rev_short is only where the tree was, not what it held)"
+      regression_lines="$regression_lines$repo: running $bin — $why; missing $behind commit(s) of $base_name"$'\n'
     fi
   fi
 
@@ -616,6 +640,8 @@ for repo_path in "$REPOS_DIR"/*; do
   if [ "$missing" -gt 0 ] && [ "$live" = false ] && [ "$parked_hours" -ge "$PARKED_GRACE_HOURS" ]; then
     status=parked-stale
     parked_fail=$((parked_fail + 1))
+    regression_fail=$((regression_fail + 1))
+    regression_lines="$regression_lines$repo: main clone parked on ${current:-<detached>} for ${parked_hours}h, missing $missing commit(s) of $base_name — any build from it ships without them"$'\n'
   fi
 
   parked_rows="$parked_rows$repo	${current:-<detached>}	$base_name	$missing	$parked_hours	$live	$status"$'\n'
@@ -632,6 +658,7 @@ GHOST_IDENTITY_FROM_FILENAME="$ghost_identity_from_filename" \
 STARTED_AT="$started_at" \
 MAX_BEHIND="$MAX_BEHIND" MAX_BEHIND_DAYS="$MAX_BEHIND_DAYS" STALE_WIP_HOURS="$STALE_WIP_HOURS" \
 DRIFT_FAIL="$drift_fail" WIP_FAIL="$wip_fail" REPORT="$REPORT" \
+REGRESSION_FAIL="$regression_fail" REGRESSION_LINES="$regression_lines" \
 PARKED_GRACE_HOURS="$PARKED_GRACE_HOURS" \
 EXECUTABLES_SCANNED="$executables_scanned" \
 SKIPPED_NOT_GO="$(printf '%s\n' ${skipped_not_go+"${skipped_not_go[@]}"})" \
@@ -723,6 +750,10 @@ report = {
     # llm-bridge-claudecode incident is the row shape this exists to catch.
     "parked_checkouts": parked,
     "parked_failures": int(os.environ["PARKED_FAIL"]),
+    # The regression class, verbatim as printed: running binaries missing ANY
+    # default-branch commit, plus parked-stale clones. Non-empty means exit 3.
+    "regression_class": [l for l in os.environ["REGRESSION_LINES"].split("\n") if l.strip()],
+    "regression_failures": int(os.environ["REGRESSION_FAIL"]),
     "artifacts": drift,
     "worktrees": wip,
 }
@@ -734,5 +765,41 @@ with open(os.environ["REPORT"], "w") as fh:
 echo
 echo "deployed artifacts: $(printf '%s' "$rows" | grep -c . || true) of $executables_scanned executables scanned (${#skipped_not_go[@]} not Go)   drift failures: $drift_fail   stale WIP: $wip_fail   parked clones: $parked_fail   ($(( finished_epoch - $(date -d "$started_at" +%s) ))s)"
 echo "report: $REPORT"
+
+if [ "$regression_fail" -gt 0 ]; then
+  echo
+  echo "REGRESSION CLASS ($regression_fail) — a running binary behind its default branch, or a parked-stale main clone:"
+  printf '%s' "$regression_lines" | sed 's/^/    /'
+  # One standing noteboard todo, tagged deploy-regression, rewritten in place so
+  # the reminder-coordinator (the only thing that nudges) carries it; never a
+  # second todo and never a cron nudge of its own. Due now, so it is overdue
+  # from the first morning it exists.
+  NOTEBOARD_URL="${NOTEBOARD_URL:-http://localhost:8191}"
+  todo_title="⚠️ Deploy regression class: $regression_fail running-binary/parked-clone finding(s) — see body"
+  todo_body="$(printf '%s\n\nWritten by repo-deploy-audit.sh at %s. Report: %s\n\n%s' "A running binary built from a commit not on its default branch or built dirty, or a main clone parked on a stale branch. Redeploy from main (or land/delete the branch); the audit rewrites this todo each morning and closes it the morning the class is empty." "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REPORT" "$regression_lines")"
+  existing_id="$(curl -sf "$NOTEBOARD_URL/api/items?type=todo&status=open&tag=deploy-regression&limit=5" 2>/dev/null | python3 -c 'import sys,json
+d=json.load(sys.stdin); items=d if isinstance(d,list) else d.get("items",[])
+print(items[0]["id"] if items else "")' 2>/dev/null || true)"
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"type":"todo","title":sys.argv[1],"body":sys.argv[2],"tags":["deploy-regression","ops"],"priority":1,"due_at":sys.argv[3]}))' "$todo_title" "$todo_body" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+  if [ -n "$existing_id" ]; then
+    curl -sf -X PATCH "$NOTEBOARD_URL/api/items/$existing_id" -H 'Content-Type: application/json' -d "$payload" >/dev/null \
+      && echo "    noteboard todo $existing_id rewritten" || echo "    WARNING: could not rewrite noteboard todo $existing_id" >&2
+  else
+    new_id="$(curl -sf -X POST "$NOTEBOARD_URL/api/items" -H 'Content-Type: application/json' -d "$payload" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+    [ -n "$new_id" ] && echo "    noteboard todo $new_id filed" || echo "    WARNING: could not file the noteboard todo" >&2
+  fi
+  exit 3
+fi
+
+# Class empty: close the standing todo if one is open, so it is never stale.
+NOTEBOARD_URL="${NOTEBOARD_URL:-http://localhost:8191}"
+open_id="$(curl -sf "$NOTEBOARD_URL/api/items?type=todo&status=open&tag=deploy-regression&limit=5" 2>/dev/null | python3 -c 'import sys,json
+d=json.load(sys.stdin); items=d if isinstance(d,list) else d.get("items",[])
+print(items[0]["id"] if items else "")' 2>/dev/null || true)"
+if [ -n "$open_id" ]; then
+  curl -sf -X PATCH "$NOTEBOARD_URL/api/items/$open_id" -H 'Content-Type: application/json' \
+    -d "{\"status\":\"done\",\"body\":\"Closed by repo-deploy-audit.sh at $(date -u +%Y-%m-%dT%H:%M:%SZ): the regression class is empty.\"}" >/dev/null \
+    && echo "regression class empty — noteboard todo $open_id closed" || echo "WARNING: could not close noteboard todo $open_id" >&2
+fi
 
 [ "$drift_fail" -eq 0 ] && [ "$wip_fail" -eq 0 ] && [ "$parked_fail" -eq 0 ]
