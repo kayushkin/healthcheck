@@ -90,6 +90,15 @@ type ServiceState struct {
 	VersionDrift     int       `json:"version_drift,omitempty"`
 	LastError        string    `json:"last_error,omitempty"`
 	EnabledState     string    `json:"enabled_state,omitempty"` // systemctl is-enabled output (only set for type=systemd)
+	// Unit, SystemUnit and URL repeat the config that identifies the thing
+	// checked: the systemd unit (and whether it is a system rather than a user
+	// unit) for type=systemd, the probed URL for type=http. They are here so a
+	// consumer can find the service's process without reading config.yaml —
+	// llm-bridge-server's service inventory maps the unit to its cgroup, and
+	// the URL's port to the listening pid, to list the databases it holds open.
+	Unit       string `json:"unit,omitempty"`
+	SystemUnit bool   `json:"system_unit,omitempty"`
+	URL        string `json:"url,omitempty"`
 	// RestartAttempts counts auto_restart attempts since the service last
 	// recovered. RestartSuppressed means that count hit
 	// maxConsecutiveAutoRestarts and healthcheck has stopped trying, so a
@@ -170,9 +179,12 @@ func New(cfg *Config) *Checker {
 	}
 	for _, svc := range cfg.Services {
 		c.states[svc.Name] = &ServiceState{
-			Name:   svc.Name,
-			Type:   svc.Type,
-			Status: StatusUnknown,
+			Name:       svc.Name,
+			Type:       svc.Type,
+			Status:     StatusUnknown,
+			Unit:       svc.Unit,
+			SystemUnit: svc.SystemUnit,
+			URL:        svc.URL,
 		}
 	}
 	for _, res := range cfg.Resources {
