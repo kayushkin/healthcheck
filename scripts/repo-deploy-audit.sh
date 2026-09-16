@@ -218,19 +218,30 @@ fi
 # it can only produce a false "stale" that a human dismisses. That asymmetry is
 # deliberate: the failure mode of this guard should be noise, never silence.
 # ---------------------------------------------------------------------------
+#
+# One request per active state, filtered by the bridge: each answers bytes to a few
+# KB. This used to fetch GET /sessions whole — every session with its info blob,
+# 64 MB and 2.6 s on 2026-09-16 — under a 5-second timeout, so as the table grew the
+# request would have started timing out and every repo would have looked idle.
+ACTIVE_STATES="starting running model_generating tool_running compacting rate_limited"
 active_dirs="$(
-  curl -sfS -m 5 "$BRIDGE_URL/sessions" 2>/dev/null |
+  for state in $ACTIVE_STATES; do
+    curl -sfS -m 5 "$BRIDGE_URL/sessions?state=$state" 2>/dev/null
+    echo
+  done |
   python3 -c '
 import json, sys
-ACTIVE = {"starting", "running", "model_generating", "tool_running", "compacting", "rate_limited"}
-try:
-    sessions = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-if isinstance(sessions, dict):
-    sessions = sessions.get("sessions", [])
-for s in sessions:
-    if s.get("state") in ACTIVE:
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        sessions = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(sessions, dict):
+        sessions = sessions.get("sessions", [])
+    for s in sessions or []:
         wd = (s.get("info") or {}).get("working_dir") or ""
         if wd:
             print(wd)
