@@ -49,6 +49,9 @@ sleep 1
 echo "==> Installing binary to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 cp "$BINARY" "$BIN_DIR/$BINARY"
+# The fleet's deploy gate lives in this repo and is installed from here, so
+# every other deploy.sh calls one copy (~/bin/deploy-gate) and none inlines it.
+install -m 755 scripts/deploy-gate.sh "$BIN_DIR/deploy-gate"
 
 echo "==> Starting $SERVICE..."
 systemctl --user daemon-reload
