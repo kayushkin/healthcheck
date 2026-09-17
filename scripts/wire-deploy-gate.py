@@ -16,7 +16,9 @@ if "--gate" in sys.argv:
     gate = sys.argv[sys.argv.index("--gate") + 1]
 
 text = open(path).read()
-if "deploy-gate" in text:
+# The calls themselves, not any mention of the gate: healthcheck's own deploy.sh
+# names it in the line that installs it.
+if re.search(r"deploy-gate(\.sh)?\"?\s+check", text):
     print(f"already wired: {path}")
     raise SystemExit(0)
 
