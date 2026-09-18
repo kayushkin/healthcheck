@@ -162,11 +162,6 @@ services:
     unit: noteboard
     auto_restart: true
 
-  - name: forge-api
-    type: systemd
-    unit: forge-api
-    auto_restart: true
-
   - name: auth-store
     type: systemd
     unit: auth-store
