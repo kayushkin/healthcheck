@@ -125,6 +125,11 @@ services:
     unit: principal-store
     auto_restart: true
 
+  - name: file-store
+    type: systemd
+    unit: file-store
+    auto_restart: true
+
   - name: producer
     type: systemd
     unit: producer
