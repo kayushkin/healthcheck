@@ -130,6 +130,22 @@ services:
     unit: file-store
     auto_restart: true
 
+  - name: discord-signup-store
+    type: systemd
+    unit: discord-signup-store
+    auto_restart: true
+
+  # The unit above being active says nothing about Discord: from 2026-09-15 to
+  # 2026-09-20 the store ran for five days with no gateway socket, and its /healthz
+  # answers 200 in every gateway state on purpose. This reads gateway.state and
+  # passes only `connected`. Deliberately NO auto_restart — a Discord outage is not
+  # the unit's fault, and a restart throws away the session's RESUME. The grace for
+  # a routine reconnect is alert_threshold, not the script.
+  - name: discord-signup-gateway
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/discord-signup-gateway-status.sh"]
+    expect_output: "ok"
+
   - name: producer
     type: systemd
     unit: producer
