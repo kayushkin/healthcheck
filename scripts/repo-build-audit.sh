@@ -739,6 +739,16 @@ for spec in deps.values():
       copy) echo "$sibrepo" ;;            # degraded: working tree, not a commit
       *) echo "!$sibrepo"; continue ;;
     esac
+    # The sibling's OWN siblings first, and only then its install. `npm ci` runs
+    # the sibling's `prepare`, and a `prepare` that compiles (bridge-ui's is
+    # `tsc`) needs the packages it links with `file:` to be there already. The
+    # top-level package gets exactly this order from the caller, so a nested
+    # sibling must too — otherwise one commit of bridge-ui is OK when swept as a
+    # package and `sibling`-red when reached through dash, and the red names a
+    # lockfile that is fine. This provisions in dependency order; it builds
+    # nothing by hand, so the header's line still holds. A cycle ends at
+    # `cached` above.
+    resolve_file_deps "$target" "$ws"
     # Install the sibling from ITS committed lockfile. Not `npm run build` — see
     # the header above; that distinction is the point of this mode.
     #
@@ -755,7 +765,6 @@ for spec in deps.values():
         echo "!install:$sibrepo"
       fi
     fi
-    resolve_file_deps "$target" "$ws"
   done
 }
 

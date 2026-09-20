@@ -250,6 +250,86 @@ else
   echo "SKIP  node check-stage fixtures (npm is not on PATH)"
 fi
 
+# ------------------------------------------------------ fixture NESTED SIBLING
+# A sibling has siblings of its own, and its install needs them. chainapp links
+# chainmiddle, chainmiddle links chainleaf, and chainmiddle's `prepare` resolves
+# chainleaf — the shape of bridge-ui's `prepare` (`tsc`) needing the store type
+# packages. `npm ci` runs `prepare`, so chainleaf has to be in the workspace
+# BEFORE chainmiddle installs. When the guard installed a sibling first and
+# provisioned that sibling's siblings second, chainmiddle was OK swept as a
+# package and `sibling`-red when reached through chainapp: one commit, two
+# verdicts, and the red named a lockfile that was fine.
+#
+# The broken pair is the control, and it fails the other way. brokenmiddle's
+# `prepare` exits 1 whatever is beside it, so brokenapp must STAY `sibling`-red.
+# Without it, a change that stopped installing siblings at all would turn the
+# chain green and read as this fix.
+#
+# `file:` links resolve on disk, so nothing here touches the network either.
+CHAINDIR="$ROOT/chain"
+mkdir -p "$CHAINDIR"
+
+# make_linked_node_pkg <dir> <file: sibling name or -> <prepare script or ->
+make_linked_node_pkg() {
+  local dir="$1" sibling="$2" prepare="$3"
+  mkdir -p "$dir"
+  git -C "$dir" init -q .
+  git -C "$dir" config user.email selftest@localhost
+  git -C "$dir" config user.name selftest
+  local name; name=$(basename "$dir")
+  NAME="$name" SIBLING="$sibling" PREPARE="$prepare" python3 -c '
+import json, os, sys
+name, sibling, prepare = (os.environ[k] for k in ("NAME", "SIBLING", "PREPARE"))
+scripts = {"build": "node -e \"0\""}
+if prepare != "-":
+    scripts["prepare"] = prepare
+pkg = {"name": name, "version": "1.0.0", "private": True, "scripts": scripts}
+root = {"name": name, "version": "1.0.0"}
+packages = {"": root}
+if sibling != "-":
+    pkg["dependencies"] = root["dependencies"] = {sibling: "file:../" + sibling}
+    packages["../" + sibling] = {"version": "1.0.0"}
+    packages["node_modules/" + sibling] = {"resolved": "../" + sibling, "link": True}
+lock = {"name": name, "version": "1.0.0", "lockfileVersion": 3, "requires": True,
+        "packages": packages}
+with open(os.path.join(sys.argv[1], "package.json"), "w") as handle:
+    handle.write(json.dumps(pkg, indent=2) + "\n")
+with open(os.path.join(sys.argv[1], "package-lock.json"), "w") as handle:
+    handle.write(json.dumps(lock, indent=2) + "\n")
+' "$dir"
+  # The link lands in node_modules, and an untracked node_modules is what the
+  # artifact stage reads as committed output gone stale.
+  echo node_modules > "$dir/.gitignore"
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm init
+}
+
+make_linked_node_pkg "$CHAINDIR/chainleaf" - -
+make_linked_node_pkg "$CHAINDIR/chainmiddle" chainleaf \
+  'node -e "require.resolve(\"chainleaf/package.json\")"'
+make_linked_node_pkg "$CHAINDIR/chainapp" chainmiddle -
+make_linked_node_pkg "$CHAINDIR/brokenmiddle" - 'node -e "process.exit(1)"'
+make_linked_node_pkg "$CHAINDIR/brokenapp" brokenmiddle -
+
+if command -v npm >/dev/null 2>&1; then
+  REPOS_DIR="$CHAINDIR" REPORT="$ROOT/chain-node.json" bash "$AUDIT" --node >"$ROOT/chain.out" 2>&1
+
+  chain_status() {  # chain_status <package> <field>
+    report_field "$ROOT/chain-node.json" \
+      "[r[\"$2\"] for r in d[\"results\"] if r[\"repo\"]==\"$1\"][0]"
+  }
+  check "node: a sibling whose prepare needs its own sibling is ok swept as a package" \
+        "ok" "$(chain_status chainmiddle status)"
+  check "node: the same sibling is ok reached through its consumer — its siblings are provisioned before it installs" \
+        "ok" "$(chain_status chainapp status)"
+  check "node: a sibling whose install fails on its own still fails its consumer" \
+        "fail" "$(chain_status brokenapp status)"
+  check "node: that failure is attributed to the sibling stage, not the consumer's build" \
+        "sibling" "$(chain_status brokenapp stage)"
+else
+  echo "SKIP  node nested-sibling fixtures (npm is not on PATH)"
+fi
+
 # ------------------------------------------------------- fixture NO TOOLCHAIN
 # The other abort path, and the one the script's own comments already named: a
 # --node run from the scheduler's empty environment finds no npm and exits 2.
