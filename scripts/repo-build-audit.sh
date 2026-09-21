@@ -249,9 +249,37 @@
 # remit is a guard people learn to ignore. Named rather than dropped, which is
 # this family's house rule for every exclusion — see the coverage identity.
 #
+# Configuration: --settings
+# -------------------------
+# A Go service here declares every environment variable it reads as an
+# llm-bridge `servicesettings.Definition`, and the /settings page draws the
+# service from those declarations. A read that bypasses them is a setting the
+# page cannot show and the registry cannot refuse, so each converted repo carries
+# a test that walks its own source and fails on any `os.Getenv` the declarations
+# do not name — `TestEveryEnvironmentVariable…IsDeclared`.
+#
+# That test only runs when somebody runs `go test`, and nothing here does: the
+# build guard stops at vet. So a converted service can gain an undeclared read
+# and every nightly guard stays green. --settings closes that. For every Go repo
+# whose committed non-test source imports servicesettings, it runs exactly the
+# scan tests from a clean clone of HEAD, siblings resolved as for --build, and
+# fails the repo when:
+#   - HEAD imports the library but declares no scan test (the library is used
+#     and nothing holds the reads to it), or
+#   - a scan test fails, or
+#   - fewer scan tests pass than HEAD declares — one in a package `./...` does
+#     not reach, or behind a build tag, or skipped, is a scan that did not run.
+#
+# A Go repo that does not import the library is not failed: the conversion is
+# still going on, and a guard that is red until it ends is a guard people learn
+# to ignore. It is named in `without_servicesettings`, with whether it ships a
+# `package main`, so the services still reading the environment on their own are
+# listed every night instead of forgotten.
+#
 # Consumed by scripts/repo-build-audit-status.sh, scripts/repo-smoke-status.sh,
-# scripts/repo-node-status.sh, scripts/repo-elf-status.sh and
-# scripts/repo-nul-status.sh, which healthcheck polls.
+# scripts/repo-node-status.sh, scripts/repo-elf-status.sh,
+# scripts/repo-nul-status.sh and scripts/repo-settings-status.sh, which
+# healthcheck polls.
 
 set -uo pipefail
 
@@ -296,6 +324,7 @@ while [ $# -gt 0 ]; do
     --node) MODE=node ;;
     --elf) MODE=elf ;;
     --nul) MODE=nul ;;
+    --settings) MODE=settings ;;
     --with-tests) WITH_TESTS=1 ;;
     --only) ONLY="${2:-}"; shift ;;
     --help|-h)
@@ -318,6 +347,7 @@ case "$MODE" in
   node)  REPORT="${REPORT:-$STATE_DIR/node-report.json}" ;;
   elf)   REPORT="${REPORT:-$STATE_DIR/elf-report.json}" ;;
   nul)   REPORT="${REPORT:-$STATE_DIR/nul-report.json}" ;;
+  settings) REPORT="${REPORT:-$STATE_DIR/settings-report.json}" ;;
   *)     REPORT="${REPORT:-$STATE_DIR/report.json}" ;;
 esac
 
@@ -804,8 +834,22 @@ without_check=()
 # healthy. A repo that loses its go.mod, or whose only `package main` moves
 # somewhere the sweep cannot see, drops out of `repos_total` — and `ok: N/N`
 # still prints, one repo smaller and just as green.
-without_go_mod=()        # build + smoke: a directory under the root with no go.mod
+without_go_mod=()        # build + smoke + settings: a directory under the root with no go.mod
 without_main_package=()  # smoke only: a Go repo whose HEAD ships no `package main`
+# settings only: a Go repo whose committed non-test source never imports
+# servicesettings. "<repo>\t<yes|no>", the second field saying whether HEAD
+# ships a `package main` — a service still reading the environment on its own,
+# as against a library with no environment of its own to declare.
+without_servicesettings=()
+# settings only: the floor. A sweep that runs no scan test fails none, so the
+# number that actually ran and passed is carried for the status reader to gate on.
+scan_tests_passed=0
+# The scan tests --settings runs, by name. Every converted repo names its test
+# this way (llm-bridge-server started it; the stores copied it), and the sweep
+# counts the declarations at HEAD against the PASS lines, so a test renamed out
+# of this pattern shows up as a repo that declares none rather than as a pass.
+SETTINGS_SCAN_TEST_PATTERN='TestEveryEnvironmentVariable[A-Za-z0-9_]*IsDeclared'
+SERVICESETTINGS_IMPORT='"github.com/kayushkin/llm-bridge/servicesettings"'
 skipped_by_only=0        # any mode: excluded by --only, so the accounting still closes
 
 if [ "$MODE" = "node" ]; then
@@ -1268,6 +1312,24 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
         echo "FAIL      $name — scripts/e2e-smoke.sh committed non-executable"
         continue ;;
     esac
+  elif [ "$MODE" = "settings" ]; then
+    # Asked of HEAD's non-test source, without the toolchain, like --smoke's
+    # main-package test. A test file importing the library for MapEnvironment
+    # does not make a repo a converted service.
+    if ! git -C "$path" grep -qF "$SERVICESETTINGS_IMPORT" HEAD -- '*.go' ':(exclude)*_test.go' 2>/dev/null; then
+      ships_main=no
+      git -C "$path" grep -qE '^package main$' HEAD -- '*.go' 2>/dev/null && ships_main=yes
+      without_servicesettings+=("$name	$ships_main"); continue
+    fi
+    total=$((total + 1))
+    scan_tests_declared=$(git -C "$path" grep -hoE "^func ${SETTINGS_SCAN_TEST_PATTERN}\\(" HEAD -- '*_test.go' 2>/dev/null | wc -l)
+    if [ "$scan_tests_declared" -eq 0 ]; then
+      failed=$((failed + 1))
+      detail="imports servicesettings but HEAD declares no ${SETTINGS_SCAN_TEST_PATTERN} test, so nothing holds its environment reads to the declarations"
+      results+=("$name	fail	no-scan-test	0	$detail")
+      echo "FAIL      $name — $detail"
+      continue
+    fi
   else
     total=$((total + 1))
   fi
@@ -1286,6 +1348,37 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   degraded=$(resolve_replaces "$ws/$name" "$ws" | tr '\n' ' ' | sed 's/ *$//')
 
   status="ok"; stage="-"; detail=""
+
+  if [ "$MODE" = "settings" ]; then
+    # -count=1 because a cached PASS is a result from some earlier tree. -v
+    # because the exit code cannot tell "the scan passed" from "no test matched",
+    # and the PASS lines can.
+    run_stage "$ws/$name" go test -count=1 -v -run "^${SETTINGS_SCAN_TEST_PATTERN}\$" ./...
+    rc=$?
+    passed=$(grep -cE "^--- PASS: ${SETTINGS_SCAN_TEST_PATTERN} " <<<"$STAGE_OUT")
+    if [ "$rc" -ne 0 ]; then
+      status="fail"; stage="test"
+      detail=$(grep -E '^\s*--- FAIL|_test\.go:[0-9]+:|^# |cannot|undefined' <<<"$STAGE_OUT" | head -8 | tr '\n' ' ' | cut -c1-500)
+      [ -n "$detail" ] || detail=$(grep -v '^$' <<<"$STAGE_OUT" | tail -6 | tr '\n' ' ' | cut -c1-500)
+      [ "$rc" -eq 124 ] && detail="timed out after ${STAGE_TIMEOUT}s"
+    elif [ "$passed" -lt "$scan_tests_declared" ]; then
+      status="fail"; stage="count"
+      detail="HEAD declares $scan_tests_declared scan test(s) and $passed ran and passed — a scan behind a build tag, skipped, or in a package ./... does not reach is a scan that did not run"
+    fi
+    scan_tests_passed=$((scan_tests_passed + passed))
+    secs=$(( $(date +%s) - repo_start ))
+    if [ "$status" = "ok" ]; then
+      ok=$((ok + 1))
+      detail="$passed scan test(s) passed${degraded:+; verified against working-tree copies of: $degraded}"
+      echo "OK        $name (${secs}s, $passed scan test(s))${degraded:+  [degraded: $degraded]}"
+    else
+      failed=$((failed + 1))
+      echo "FAIL      $name — $stage: $detail"
+    fi
+    results+=("$name	$status	$stage	$secs	$detail")
+    rm -rf "$ws"
+    continue
+  fi
 
   if [ "$MODE" = "smoke" ]; then
     # The workspace deliberately mirrors ~/repos: the repo sits at $ws/$name and
@@ -1399,6 +1492,8 @@ printf '%s\n' "${results[@]}" |
   SKIPPED_BY_ONLY="$skipped_by_only" \
   WITHOUT_GO_MOD="$(printf '%s\n' ${without_go_mod+"${without_go_mod[@]}"})" \
   WITHOUT_MAIN_PACKAGE="$(printf '%s\n' ${without_main_package+"${without_main_package[@]}"})" \
+  WITHOUT_SERVICESETTINGS="$(printf '%s\n' ${without_servicesettings+"${without_servicesettings[@]}"})" \
+  SCAN_TESTS_PASSED="$scan_tests_passed" \
   FILES_SCANNED="$files_scanned" \
   GENERATED_WITH_NUL="$(printf '%s\n' ${generated_with_nul+"${generated_with_nul[@]}"})" \
   REPORT="$REPORT" \
@@ -1465,7 +1560,7 @@ if mode != "node":
     # against. Its own coverage gap is tracked separately.
     report["directories_scanned"] = int(os.environ["DIRECTORIES_SCANNED"])
     report["skipped_by_only"] = int(os.environ["SKIPPED_BY_ONLY"])
-if mode in ("build", "smoke"):
+if mode in ("build", "smoke", "settings"):
     # Directories under the repos root that are not Go repositories at all.
     report["without_go_mod"] = [
         d for d in os.environ["WITHOUT_GO_MOD"].splitlines() if d.strip()
@@ -1517,6 +1612,20 @@ elif mode == "nul":
             line.partition("\t") for line in os.environ["GENERATED_WITH_NUL"].splitlines() if line.strip()
         )
     ]
+elif mode == "settings":
+    # Go repos whose committed non-test source never imports servicesettings,
+    # and so were not judged. Named, not dropped: the coverage identity counts
+    # them, and a reader wants the services still reading the environment on
+    # their own, which is the ones that ship a main package.
+    report["without_servicesettings"] = [
+        {"repo": r, "ships_main_package": m == "yes"}
+        for r, _, m in (
+            line.partition("\t") for line in os.environ["WITHOUT_SERVICESETTINGS"].splitlines() if line.strip()
+        )
+    ]
+    # The floor. Zero scan tests run is zero scan tests failed, so this is the
+    # number that tells a passing verdict from a vacuous one.
+    report["scan_tests_passed"] = int(os.environ["SCAN_TESTS_PASSED"])
 # elf carries no extra keys of its own: it neither runs tests nor a toolchain.
 if mode != "smoke":
     # smoke counts coverage with no_smoke instead: a repo it cannot boot is
@@ -1534,6 +1643,8 @@ elif [ "$MODE" = "node" ]; then
   echo "$ok/$total node packages install, build and pass their declared checks from a clean clone of HEAD; $failed failing, $unguarded unguarded, ${#without_check[@]} declaring no check script ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "elf" ]; then
   echo "$ok/$total repos carry no committed ELF binary at HEAD; $failed with committed binaries, $unguarded unguarded ($(( finished_epoch - start_epoch ))s)"
+elif [ "$MODE" = "settings" ]; then
+  echo "$ok/$total repos that import servicesettings pass their environment-read scan from a clean clone of HEAD; $failed failing, $unguarded unguarded, $scan_tests_passed scan test(s) passed, ${#without_servicesettings[@]} Go repo(s) not using the library ($(( finished_epoch - start_epoch ))s)"
 elif [ "$MODE" = "nul" ]; then
   echo "$ok/$total repos carry no raw NUL byte in committed source at HEAD; $failed with a NUL, $unguarded unguarded, $files_scanned source files read, ${#generated_with_nul[@]} generated blob(s) named but not failed ($(( finished_epoch - start_epoch ))s)"
 else

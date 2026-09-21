@@ -611,6 +611,7 @@ identity() {
   report_field "$1" \
     'd["directories_scanned"] - (d["repos_total"] + len(d["worktrees"])
      + len(d.get("without_go_mod") or []) + len(d.get("without_main_package") or [])
+     + len(d.get("without_servicesettings") or [])
      + d["skipped_by_only"])'
 }
 
@@ -1342,6 +1343,89 @@ if command -v npm >/dev/null 2>&1; then
         "$empty_rc $(case "$empty_out" in *"judged 0 packages"*) echo yes ;; *) echo "no: $empty_out" ;; esac)"
 else
   echo "SKIP  node empty-sweep fixture (npm is not on PATH)"
+fi
+
+# ---------------------------------------------------------- fixture SETTINGS
+# --settings runs each converted repo's own environment-read scan from a clean
+# clone. The fixture stands a stub llm-bridge beside the repos, so a repo can
+# import servicesettings and resolve it through a relative `replace` exactly as
+# the real stores do, with no network and no real repo cloned.
+#
+# Each repo below is one route a converted service can take out of the scan,
+# plus the ones that must not count as converted at all. `pass` is the control:
+# without it every red case here would pass against a mode that fails everything.
+if command -v go >/dev/null 2>&1; then
+  SET="$ROOT/settings-root"
+  mkdir -p "$SET/llm-bridge/servicesettings"
+  printf 'module github.com/kayushkin/llm-bridge\n\ngo 1.22\n' > "$SET/llm-bridge/go.mod"
+  printf 'package servicesettings\n\nconst Name = "stub"\n' > "$SET/llm-bridge/servicesettings/servicesettings.go"
+  git -C "$SET/llm-bridge" init -q .
+  git -C "$SET/llm-bridge" -c user.email=s@l -c user.name=s add -A
+  git -C "$SET/llm-bridge" -c user.email=s@l -c user.name=s commit -qm init
+
+  # settings_repo <name> <scan test file body or -> <import from test only: yes|no>
+  settings_repo() {
+    local dir="$SET/$1"
+    mkdir -p "$dir"
+    printf 'module example.com/%s\n\ngo 1.22\n\nrequire github.com/kayushkin/llm-bridge v0.0.0\n\nreplace github.com/kayushkin/llm-bridge => ../llm-bridge\n' "$1" > "$dir/go.mod"
+    if [ "$3" = "yes" ]; then
+      printf 'package main\n\nfunc main() {}\n' > "$dir/main.go"
+      printf 'package main\n\nimport (\n\t"testing"\n\n\t"github.com/kayushkin/llm-bridge/servicesettings"\n)\n\nfunc TestStub(t *testing.T) { _ = servicesettings.Name }\n' > "$dir/stub_test.go"
+    else
+      printf 'package main\n\nimport "github.com/kayushkin/llm-bridge/servicesettings"\n\nfunc main() { _ = servicesettings.Name }\n' > "$dir/main.go"
+    fi
+    [ "$2" = "-" ] || printf '%s\n' "$2" > "$dir/settings_test.go"
+    git -C "$dir" init -q .
+    git -C "$dir" -c user.email=s@l -c user.name=s add -A
+    git -C "$dir" -c user.email=s@l -c user.name=s commit -qm init
+  }
+  scan='package main
+
+import "testing"
+
+func TestEveryEnvironmentVariableTheServiceReadsIsDeclared(t *testing.T) {}'
+  settings_repo pass "$scan" no
+  settings_repo noscan - no
+  settings_repo red "${scan/\{\}/{ t.Fatal(\"main.go reads UNDECLARED\") \}}" no
+  settings_repo tagged "//go:build never
+
+$scan" no
+  settings_repo skipped "${scan/\{\}/{ t.Skip(\"control\") \}}" no
+  settings_repo testonly - yes
+  mkdir -p "$SET/notgo"   # no go.mod: named in without_go_mod
+
+  REPOS_DIR="$SET" REPORT="$ROOT/settings.json" bash "$AUDIT" --settings >"$ROOT/settings.out" 2>&1
+  status_of() { report_field "$ROOT/settings.json" "[r[\"stage\"] + \":\" + r[\"status\"] for r in d[\"results\"] if r[\"repo\"] == \"$1\"][0]"; }
+  check "settings: a converted repo whose scan passes is ok" "-:ok" "$(status_of pass)"
+  check "settings: importing the library with no scan test fails" "no-scan-test:fail" "$(status_of noscan)"
+  check "settings: a failing scan fails the repo" "test:fail" "$(status_of red)"
+  check "settings: a scan behind a build tag did not run, and fails" "count:fail" "$(status_of tagged)"
+  check "settings: a skipped scan did not run, and fails" "count:fail" "$(status_of skipped)"
+  check "settings: a repo importing the library only from a test is not converted" \
+        "[{'repo': 'llm-bridge', 'ships_main_package': False}, {'repo': 'testonly', 'ships_main_package': True}]" \
+        "$(report_field "$ROOT/settings.json" 'd["without_servicesettings"]')"
+  check "settings: only the scans that passed are counted toward the floor" \
+        "1" "$(report_field "$ROOT/settings.json" 'd["scan_tests_passed"]')"
+  check "settings: the coverage accounting closes" "0" "$(identity "$ROOT/settings.json")"
+
+  settings_out=$(REPORT="$ROOT/settings.json" bash "$HERE/repo-settings-status.sh" 2>&1)
+  check "settings: repo-settings-status.sh fails the fleet and names a culprit" \
+        "1 yes" "$? $(case "$settings_out" in *"noscan (no-scan-test)"*) echo yes ;; *) echo "no: $settings_out" ;; esac)"
+
+  REPOS_DIR="$SET" REPORT="$ROOT/settings-only.json" bash "$AUDIT" --settings --only pass >/dev/null 2>&1
+  settings_out=$(REPORT="$ROOT/settings-only.json" MIN_SCAN_TESTS_PASSED=1 bash "$HERE/repo-settings-status.sh" 2>&1)
+  check "settings: repo-settings-status.sh refuses a --only sweep" \
+        "1 yes" "$? $(case "$settings_out" in *"ran with --only pass"*) echo yes ;; *) echo "no: $settings_out" ;; esac)"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["only"]=""; json.dump(d, open(sys.argv[2], "w"))' \
+    "$ROOT/settings-only.json" "$ROOT/settings-green.json"
+  settings_out=$(REPORT="$ROOT/settings-green.json" MIN_SCAN_TESTS_PASSED=1 bash "$HERE/repo-settings-status.sh" 2>&1)
+  check "settings: repo-settings-status.sh passes a clean sweep over the floor" \
+        "0 yes" "$? $(case "$settings_out" in ok:*) echo yes ;; *) echo "no: $settings_out" ;; esac)"
+  settings_out=$(REPORT="$ROOT/settings-green.json" MIN_SCAN_TESTS_PASSED=2 bash "$HERE/repo-settings-status.sh" 2>&1)
+  check "settings: repo-settings-status.sh refuses the same sweep under the floor" \
+        "1 yes" "$? $(case "$settings_out" in *"passed only 1 scan tests"*) echo yes ;; *) echo "no: $settings_out" ;; esac)"
+else
+  echo "SKIP  settings fixture (go is not on PATH)"
 fi
 
 echo

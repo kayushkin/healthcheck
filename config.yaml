@@ -356,6 +356,23 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-nul-status.sh"]
     expect_output: "ok"
 
+  # Tier 1, configuration: does every Go service that declares its settings with
+  # llm-bridge servicesettings still read ONLY the environment variables it
+  # declares? Each converted repo carries a test that fails on an undeclared
+  # os.Getenv, but nothing here runs `go test`, so an undeclared read could land
+  # and every guard above would stay green — while the /settings page stopped
+  # showing that setting and the registry stopped refusing it.
+  #
+  # Same shape as the guards above: the sweep runs nightly under the scheduler
+  # (repo-settings-guard job, 02:15 UTC, clear of the 03:00-05:00 pile) with
+  # repo-build-audit.sh --settings and leaves its verdict in settings-report.json;
+  # this check only reads it. A Go repo that does not import the library is
+  # named, not failed, while the conversion is still going on.
+  - name: repo-settings-guard
+    type: command
+    command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-settings-status.sh"]
+    expect_output: "ok"
+
   # A different axis from the four above: those watch repos, this watches the
   # session table. Every session row carries type (how it runs), purpose (what it
   # does) and origin (who created it). All three are load-bearing — permission
