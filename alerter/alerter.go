@@ -188,13 +188,13 @@ func (a *Alerter) createEscalationSession(name string, state checker.ResourceSta
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Post(a.llmBridgeURL+"/sessions", "application/json", bytes.NewReader(createBody))
 	if err != nil {
-		log.Printf("LLMUX-ESCALATION: create session failed: %v", err)
+		log.Printf("HEALTHCHECK-ESCALATION: create session failed: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		log.Printf("LLMUX-ESCALATION: create session returned %d: %s", resp.StatusCode, string(body))
+		log.Printf("HEALTHCHECK-ESCALATION: create session returned %d: %s", resp.StatusCode, string(body))
 		return
 	}
 
@@ -208,28 +208,28 @@ func (a *Alerter) createEscalationSession(name string, state checker.ResourceSta
 		DisplayName string `json:"display_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
-		log.Printf("LLMUX-ESCALATION: decode session response: %v", err)
+		log.Printf("HEALTHCHECK-ESCALATION: decode session response: %v", err)
 		return
 	}
 	if session.SessionID == "" {
-		log.Printf("LLMUX-ESCALATION: server returned no session_id; nothing to send the prompt to")
+		log.Printf("HEALTHCHECK-ESCALATION: server returned no session_id; nothing to send the prompt to")
 		return
 	}
 
 	sendBody, _ := json.Marshal(map[string]string{"message": prompt})
 	sendResp, err := client.Post(a.llmBridgeURL+"/sessions/"+session.SessionID+"/send", "application/json", bytes.NewReader(sendBody))
 	if err != nil {
-		log.Printf("LLMUX-ESCALATION: send message to %s failed: %v", session.SessionID, err)
+		log.Printf("HEALTHCHECK-ESCALATION: send message to %s failed: %v", session.SessionID, err)
 		return
 	}
 	defer sendResp.Body.Close()
 	if sendResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(sendResp.Body)
-		log.Printf("LLMUX-ESCALATION: send message returned %d: %s", sendResp.StatusCode, string(body))
+		log.Printf("HEALTHCHECK-ESCALATION: send message returned %d: %s", sendResp.StatusCode, string(body))
 		return
 	}
 
-	log.Printf("LLMUX-ESCALATION: created session %s (%q) for %s", session.SessionID, session.DisplayName, name)
+	log.Printf("HEALTHCHECK-ESCALATION: created session %s (%q) for %s", session.SessionID, session.DisplayName, name)
 }
 
 func (a *Alerter) OnRestart(name string, success bool, err error) {

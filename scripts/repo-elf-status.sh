@@ -67,7 +67,7 @@ if report.get("mode") != "elf":
     # hand without clobbering the fleet report. Here it goes wrong in the loud
     # direction rather than the quiet one, which is worse to read: fed the node
     # report, this file announced "1 repo(s) have a committed ELF binary at HEAD:
-    # llmux" — llmux has no such thing, its actual failure was a stale JavaScript
+    # llmux" — llmux (since removed) had no such thing, its actual failure was a stale JavaScript
     # bundle. A guard that names a repo for a crime it did not commit sends
     # someone after a file that is not there. The sweep stamps mode on every
     # report it writes, including the aborted ones.

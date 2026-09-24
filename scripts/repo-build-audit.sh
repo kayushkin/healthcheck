@@ -134,7 +134,7 @@
 #   The repo's own build script is the contract; this runs THAT.
 #
 # The third stage, `artifact`, has no Go equivalent and is the reason this mode
-# earns its keep. bridge-ui, dash, llmux and kayushkin.com all COMMIT their build
+# earns its keep. bridge-ui, dash and kayushkin.com all COMMIT their build
 # output, and consumers serve it directly — so a committed bundle that no longer
 # matches its committed source ships stale JS to real users, silently, with a
 # clean `git status`. After building, this asserts the clean clone is UNCHANGED.
@@ -718,7 +718,7 @@ lockfile_at_head() {
 #   npm correctly hoisted @xterm/xterm into it. The sibling needs its own
 #   node_modules, which is exactly why the fleet workflow says to build the
 #   library first and the consumers second. Cloning without installing would
-#   report dash and llmux broken when they are fine.
+#   report dash broken when it is fine.
 #
 #   Never built, because `npm ci` runs a linked package's `prepare` script, and
 #   `prepare` is precisely npm-for-"produce my entry point before anyone consumes
@@ -952,7 +952,7 @@ if [ "$MODE" = "node" ]; then
 
     # artifact — the stage with no Go equivalent, and the reason this mode exists.
     #
-    # bridge-ui, dash, llmux and kayushkin.com all COMMIT their build output, and
+    # bridge-ui, dash and kayushkin.com all COMMIT their build output, and
     # what gets served IS that committed directory. So a bundle that no longer
     # matches the source it claims to be built from is not a cosmetic diff — it
     # is stale JavaScript shipped to real users, from a tree whose `git status`
@@ -1163,7 +1163,7 @@ SOURCE_EXTENSIONS = {
 # Generated trees. A bundle here can carry a NUL, but only ever because a
 # source file upstream of it does, so failing on it would report the same
 # defect twice and stay red until somebody re-ran a build. Counted and named
-# separately instead. Measured 2026-08-15: five such blobs across dash, llmux
+# separately instead. Measured 2026-08-15: five such blobs across dash, llmux (since removed)
 # and bridge-ui/dist, every one of them a compiled copy of the same two source
 # files this mode was written for.
 GENERATED_DIRECTORIES = {"node_modules", "dist", "vendor"}
@@ -1423,8 +1423,8 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
   # The two `go build` invocations have opposite failure modes, so choose per repo:
   #
   #   go build ./...          drops each main package's binary into the CURRENT
-  #                           directory, named after the package. dash and llmux
-  #                           both keep their main package in server/, so the write
+  #                           directory, named after the package. dash keeps its
+  #                           main package in server/, so the write
   #                           collides with that very directory — `build output
   #                           "server" already exists and is a directory`.
   #   go build -o DIR/ ./...  sends binaries elsewhere, but REFUSES a tree with no
