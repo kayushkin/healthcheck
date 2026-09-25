@@ -43,8 +43,8 @@ echo "    built: $(ls -lh "$BINARY" | awk '{print $5}')"
 # it in front of live sessions and only then tell us it cannot be traced to a commit.
 echo "==> Checking provenance..."
 buildinfo="$(go version -m "$BINARY")"
-vcs_revision="$(printf '%s\n' "$buildinfo" | awk -F= '$1 ~ /[[:space:]]vcs\.revision$/ {{print $2}}')"
-vcs_modified="$(printf '%s\n' "$buildinfo" | awk -F= '$1 ~ /[[:space:]]vcs\.modified$/ {{print $2}}')"
+vcs_revision="$(printf '%s\n' "$buildinfo" | awk -F= '$1 ~ /[[:space:]]vcs\.revision$/ {print $2}')"
+vcs_modified="$(printf '%s\n' "$buildinfo" | awk -F= '$1 ~ /[[:space:]]vcs\.modified$/ {print $2}')"
 if [ -z "$vcs_revision" ]; then
     echo "    REFUSING TO INSTALL: this binary carries no vcs.revision, so nothing can tie" >&2
     echo "    it back to a commit. 'go build' writes no VCS stamp when it cannot find a .git" >&2
