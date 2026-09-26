@@ -29,11 +29,11 @@ services:
   # kayushkin.com is a USER unit (~/.config/systemd/user/kayushkin.service). It is
   # the process that actually binds 127.0.0.1:8080 and serves the site.
   #
-  # Two units of this name exist and both run ~/bin/kayushkin-server, so the name
-  # alone cannot tell you which is real — measure it. Verified 2026-08-17: the user
-  # unit is active with MainPID 2060343, and `ss -tlnp` shows that same pid holding
-  # :8080. The system unit (/etc/systemd/system/kayushkin.service) is failed and
-  # disabled; it was last killed 2026-08-16 with SIGKILL and binds nothing.
+  # A system unit of the same name used to exist too, and the two raced for :8080.
+  # It is gone: measured 2026-09-26, /etc/systemd/system holds only
+  # kayushkin.service.bak-2026-07-12, `systemctl is-enabled kayushkin` answers
+  # not-found, and the pid holding :8080 sits in the user unit's cgroup. If a second
+  # unit ever comes back, measure which one binds :8080 before trusting this check.
   #
   # This check previously carried system_unit: true, on a comment asserting the
   # reverse of the above. That pointed it at the dead unit, which is why it read
