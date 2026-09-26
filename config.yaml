@@ -130,6 +130,11 @@ services:
     unit: file-store
     auto_restart: true
 
+  - name: article-store
+    type: systemd
+    unit: article-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
