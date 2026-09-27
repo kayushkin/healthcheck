@@ -9,9 +9,11 @@ import (
 )
 
 // userManagerReachable reports whether `systemctl --user` can actually answer
-// here. It returns empty output rather than an error when XDG_RUNTIME_DIR /
-// DBUS_SESSION_BUS_ADDRESS are missing, so a test that assumed it worked would
-// read that silence as a finding. Skip instead of lying.
+// here. With XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS missing, systemd 255
+// exits 1 with "Failed to connect to bus"; the empty-output check covers a
+// manager that answers with nothing. A test that assumed it worked would read
+// either as a finding, so skip instead of lying. Agent shells on this host have
+// neither variable, so run these tests with XDG_RUNTIME_DIR=/run/user/$(id -u).
 func userManagerReachable(t *testing.T) {
 	t.Helper()
 	out, err := exec.Command("systemctl", "--user", "show", "-p", "Version", "--value").Output()
