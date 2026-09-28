@@ -135,6 +135,11 @@ services:
     unit: article-store
     auto_restart: true
 
+  - name: work-graph-store
+    type: systemd
+    unit: work-graph-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
