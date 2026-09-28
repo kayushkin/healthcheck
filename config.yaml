@@ -140,6 +140,11 @@ services:
     unit: work-graph-store
     auto_restart: true
 
+  - name: project-store
+    type: systemd
+    unit: project-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
