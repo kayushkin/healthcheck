@@ -150,6 +150,11 @@ services:
     unit: people-store
     auto_restart: true
 
+  - name: journal-store
+    type: systemd
+    unit: journal-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
