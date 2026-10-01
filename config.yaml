@@ -145,6 +145,11 @@ services:
     unit: project-store
     auto_restart: true
 
+  - name: people-store
+    type: systemd
+    unit: people-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
