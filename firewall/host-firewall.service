@@ -1,0 +1,18 @@
+[Unit]
+Description=Host firewall: the nftables table inet host_firewall
+Documentation=file:///home/kayushkincom/repos/healthcheck/firewall/README.md
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/host-firewall.nft
+# Removes this table only; never "nft flush ruleset", which would take
+# Docker's tables with it.
+ExecStop=/usr/sbin/nft delete table inet host_firewall
+
+[Install]
+WantedBy=sysinit.target

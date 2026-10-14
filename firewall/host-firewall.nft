@@ -1,0 +1,36 @@
+#!/usr/sbin/nft -f
+# Host firewall for the Linode (kayushkin.com), added 2026-10-14.
+#
+# Before this the host had no firewall, and about thirty services listening on
+# every interface were reachable from the internet past nginx: among them
+# scheduler (:8092, unauthenticated, runs shell jobs), llm-bridge (:8160, demo
+# login with no password) and kanban-store (:8305, trusts X-Principal-Id).
+# Only these come in from outside now: SSH, nginx's 80/443 and dash's
+# 9100-9119. Services reach each other over loopback, Docker's containers over
+# their bridges, and runner machines through SSH tunnels.
+#
+# Its own table, loaded by host-firewall.service, so it never touches Docker's
+# iptables-nft rules: do not use nftables.service, whose stop runs
+# "nft flush ruleset" and would remove Docker's tables too.
+
+table inet host_firewall
+delete table inet host_firewall
+
+table inet host_firewall {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		iifname "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+
+		# Containers (the Matrix bridges and friends) reach host services.
+		iifname { "docker0", "br-*" } accept
+
+		meta l4proto { icmp, ipv6-icmp } accept
+
+		tcp dport { 22, 80, 443, 9100-9119 } accept
+
+		limit rate 10/minute log prefix "host-firewall drop: " level info
+	}
+}
