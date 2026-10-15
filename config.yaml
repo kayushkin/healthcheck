@@ -463,6 +463,12 @@ services:
     system_unit: true
     auto_restart: true
 
+  - name: flaresolverr
+    type: systemd
+    unit: flaresolverr
+    system_unit: true
+    auto_restart: true
+
   - name: videostack
     type: systemd
     unit: videostack
