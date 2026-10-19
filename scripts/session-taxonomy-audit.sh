@@ -120,9 +120,24 @@ command -v curl >/dev/null 2>&1 || {
   exit 2
 }
 
+# llm-bridge-server answers 401 to a call with no credential (since about
+# 2026-09-18), and this guard failed every night for that reason, reporting
+# zero counts. It calls as the internal service, with the token from the
+# shared tokens file, as scheduler job 11 does. A missing token is a failure
+# to say so, never a call made without one.
+TOKENS_FILE="${PRINCIPAL_GATING_TOKENS_FILE:-$HOME/.config/principal-gating-tokens.env}"
+if [ -z "${LLMBRIDGE_SERVICE_TOKEN:-}" ] && [ -r "$TOKENS_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$TOKENS_FILE"
+fi
+if [ -z "${LLMBRIDGE_SERVICE_TOKEN:-}" ]; then
+  write_aborted_report "no LLMBRIDGE_SERVICE_TOKEN in the environment or in $TOKENS_FILE"
+  exit 2
+fi
+
 # -f so an HTTP error becomes a non-zero exit rather than an error page that
 # python would then fail to parse with a less useful message.
-raw="$(curl -fsS --max-time 60 "$BRIDGE_URL/session-taxonomy/report" 2>&1)"
+raw="$(curl -fsS --max-time 60 -H "X-LLM-Bridge-Service-Token: $LLMBRIDGE_SERVICE_TOKEN" "$BRIDGE_URL/session-taxonomy/report" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
   write_aborted_report "GET $BRIDGE_URL/session-taxonomy/report failed (curl rc=$rc): ${raw:0:300}"
