@@ -130,6 +130,11 @@ services:
     unit: principal-store
     auto_restart: true
 
+  - name: rule-store
+    type: systemd
+    unit: rule-store
+    auto_restart: true
+
   - name: file-store
     type: systemd
     unit: file-store
