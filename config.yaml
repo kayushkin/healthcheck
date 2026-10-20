@@ -115,6 +115,14 @@ services:
     unit: quote-store
     auto_restart: true
 
+  # Google Messages for web into Matrix (repo gmessages-web-bridge). Healthy
+  # means the service runs; whether the Mac's Chrome is feeding it shows in
+  # its journal, not here.
+  - name: gmessages-web-bridge
+    type: systemd
+    unit: gmessages-web-bridge
+    auto_restart: true
+
   - name: eval-store
     type: systemd
     unit: eval-store
