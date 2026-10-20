@@ -186,6 +186,11 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/discord-signup-gateway-status.sh"]
     expect_output: "ok"
 
+  - name: orchestrator
+    type: systemd
+    unit: orchestrator
+    auto_restart: true
+
   - name: multichat-server
     type: systemd
     unit: multichat-server
