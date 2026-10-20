@@ -160,6 +160,11 @@ services:
     unit: people-store
     auto_restart: true
 
+  - name: short-name-store
+    type: systemd
+    unit: short-name-store
+    auto_restart: true
+
   - name: journal-store
     type: systemd
     unit: journal-store
