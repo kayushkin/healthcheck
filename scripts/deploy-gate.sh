@@ -172,6 +172,10 @@ text=("[deploy-gate] The deploy of %s at %s that this session started has finish
       "llm-bridge, your turn may have been cut off and resumed on its own before this arrived. Check what the "
       "deploy changed, finish what the request still needs, and tell the user the outcome.\n\n"
       "Last 25 lines of %s:\n```\n%s```" % (log or "the log", tail))
+# A bridge report (llm-bridge msg.WrapBridgeReport): the whole message is one
+# <bridge-report kind="deploy"> block, so the chat folds it instead of drawing it
+# as something the person wrote.
+text='<bridge-report kind="deploy">\n' + text + '\n</bridge-report>'
 print(json.dumps({"message":text}))
 PY
 )"
