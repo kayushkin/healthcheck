@@ -183,6 +183,11 @@ services:
     unit: journal-store
     auto_restart: true
 
+  - name: photo-store
+    type: systemd
+    unit: photo-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
