@@ -50,9 +50,9 @@ services:
     unit: dash-server
     auto_restart: true
 
-  - name: inber-party
+  - name: agent-party
     type: systemd
-    unit: inber-party
+    unit: agent-party
     auto_restart: true
 
   - name: inber-server
