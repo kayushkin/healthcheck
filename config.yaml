@@ -1,6 +1,6 @@
 check_interval: 60s
 alert_threshold: 3
-listen_addr: ":8099"
+listen_addr: "127.0.0.1:8099"  # loopback: dash proxies it on localhost, and its routes take no credentials
 # Not /tmp: this host clears /tmp at boot, and the 2026-09-07 reboot took four days
 # of alert history with it. The alerter creates the directory.
 log_file: "/home/kayushkincom/.local/state/healthcheck/alerts.log"

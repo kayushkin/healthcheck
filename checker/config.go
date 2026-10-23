@@ -65,7 +65,7 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.AlertThreshold = 3
 	}
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = ":8099"
+		cfg.ListenAddr = "127.0.0.1:8099"
 	}
 	return &cfg, nil
 }
