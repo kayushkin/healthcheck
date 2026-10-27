@@ -188,6 +188,11 @@ services:
     unit: photo-store
     auto_restart: true
 
+  - name: location-store
+    type: systemd
+    unit: location-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
