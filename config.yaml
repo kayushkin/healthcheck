@@ -479,6 +479,11 @@ services:
     system_unit: true
     auto_restart: true
 
+  - name: sheetstack
+    type: systemd
+    unit: sheetstack
+    auto_restart: true
+
   - name: downloadstack
     type: systemd
     unit: downloadstack
