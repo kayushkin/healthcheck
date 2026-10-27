@@ -173,6 +173,11 @@ services:
     unit: short-name-store
     auto_restart: true
 
+  - name: voice-intake
+    type: systemd
+    unit: voice-intake
+    auto_restart: true
+
   - name: sign-in-store
     type: systemd
     unit: sign-in-store
