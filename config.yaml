@@ -178,6 +178,12 @@ services:
     unit: voice-intake
     auto_restart: true
 
+  # whisper.cpp speech-to-text server that voice-intake sends segment audio to.
+  - name: whisper-server
+    type: systemd
+    unit: whisper-server
+    auto_restart: true
+
   - name: sign-in-store
     type: systemd
     unit: sign-in-store
