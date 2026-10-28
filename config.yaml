@@ -210,6 +210,11 @@ services:
     unit: location-store
     auto_restart: true
 
+  - name: activity-store
+    type: systemd
+    unit: activity-store
+    auto_restart: true
+
   - name: discord-signup-store
     type: systemd
     unit: discord-signup-store
