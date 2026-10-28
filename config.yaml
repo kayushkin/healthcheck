@@ -184,6 +184,12 @@ services:
     unit: whisper-server
     auto_restart: true
 
+  # Parakeet speech-to-text and Silero speech detection, kept in memory, that voice-intake streams audio to.
+  - name: speech-server
+    type: systemd
+    unit: speech-server
+    auto_restart: true
+
   - name: sign-in-store
     type: systemd
     unit: sign-in-store
