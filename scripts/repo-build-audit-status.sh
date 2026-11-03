@@ -155,7 +155,7 @@ if "directories_scanned" not in report:
 #                        + worktrees + without_go_mod + without_main_package
 #                        + skipped_by_only
 #
-# It is an identity, not a policy. It passes no judgement on whether an exclusion
+# It is an identity, not a policy. It passes no judgment on whether an exclusion
 # was reasonable — only that every directory under the root left the sweep by a
 # route the report names. When it fails, a directory stopped being covered
 # through a path nobody wrote down.

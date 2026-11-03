@@ -65,7 +65,7 @@ _SPEC.loader.exec_module(audit_module)
 CONFORMING = '''\
 import sys
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -82,7 +82,7 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 CAUGHT_BY_LINE = '''\
 import sys
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -99,7 +99,7 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 SABOTAGE_UNCAUGHT = '''\
 import sys
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -114,7 +114,7 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 SABOTAGE_CAUGHT_NOTHING = '''\
 import sys
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -133,7 +133,7 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 SABOTAGE_CRASHES = '''\
 import sys
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 ARMS = ["breaks-the-predicate"]
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
@@ -151,7 +151,7 @@ print("CLEAN: 2/2 rows as expected"); sys.exit(0)
 CRASHES_ON_THE_CAPABILITY_PROBE = '''\
 import sys
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 if "--list-sabotages" in sys.argv:
     print("breaks-the-predicate"); sys.exit(0)
 if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
@@ -182,7 +182,7 @@ print("   CAUGHT   the predicate cannot read a tag")
 print("9/9 sabotages caught"); sys.exit(0)
 '''
 
-# Honours --sabotage and ignores --list-sabotages, so its arms exist and cannot be
+# Honors --sabotage and ignores --list-sabotages, so its arms exist and cannot be
 # enumerated. This is `~/.nightly-348-buildtags/selftest.py` as it stood before
 # 2026-08-22, and it is why the audit's first run had a finding.
 #
@@ -208,7 +208,7 @@ COMPLAINS_ABOUT_THE_FLAG_AND_EXITS_ZERO = '''\
 import sys
 ARMS = ["breaks-the-predicate"]
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(0)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(0)
 if "--list-sabotages" in sys.argv:
     print("\\n".join(ARMS)); sys.exit(0)
 if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
@@ -225,7 +225,7 @@ MODULE_SOURCE = "# a shared instrument\n"
 # reading `ast.walk` — the walk promotes this shared instrument to a control set and
 # then runs it as though it were a suite.
 MODULE_WITH_A_LOCAL_CALLED_ARMS = '''\
-def summarise(rows):
+def summarize(rows):
     CASES = [row for row in rows if row]
     return CASES
 '''
@@ -238,7 +238,7 @@ import sys
 def arms():
     return ["breaks-the-predicate"]
 if len(sys.argv) > 1 and sys.argv[1] not in ("--sabotage", "--list-sabotages"):
-    print("unrecognised argument %r" % sys.argv[1]); sys.exit(2)
+    print("unrecognized argument %r" % sys.argv[1]); sys.exit(2)
 if "--list-sabotages" in sys.argv:
     print("\\n".join(arms())); sys.exit(0)
 if len(sys.argv) > 2 and sys.argv[1] == "--sabotage":
@@ -403,12 +403,12 @@ def case_flag_ignoring_set_yields_no_invented_arms(work):
     record = result["control_sets"][0]
     labels = [a["label"] for a in record["arms"]]
     return (labels == ["clean"] and record["sabotages_run"] is False
-            and "does not honour --sabotage" in record["sabotages_unrun_because"]), \
+            and "does not honor --sabotage" in record["sabotages_unrun_because"]), \
         f"labels={labels} because={record.get('sabotages_unrun_because')}"
 
 
 def case_flag_ignoring_set_is_a_finding(work):
-    """Ignoring an unrecognised flag is reported, not merely worked around.
+    """Ignoring an unrecognized flag is reported, not merely worked around.
 
     The audit already copes with the old dialect — it probes capability instead of
     assuming it — and coping quietly is how the dialect survived. A control set that
@@ -417,17 +417,17 @@ def case_flag_ignoring_set_is_a_finding(work):
     root = build_fixture(os.path.join(work, "ignoresfinding"),
                          modules=["alpha"], control_sets=[("alpha", IGNORES_FLAGS)])
     result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
-    return bool(findings_matching(result, "ignores an unrecognised flag")), \
+    return bool(findings_matching(result, "ignores an unrecognized flag")), \
         f"findings={result['findings']}"
 
 
 def case_a_complaint_without_a_status_is_still_a_finding(work):
-    """Printing "unrecognised argument" and exiting 0 leaves every caller green."""
+    """Printing "unrecognized argument" and exiting 0 leaves every caller green."""
     root = build_fixture(
         os.path.join(work, "complains"), modules=["alpha"],
         control_sets=[("alpha", COMPLAINS_ABOUT_THE_FLAG_AND_EXITS_ZERO)])
     result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
-    return bool(findings_matching(result, "ignores an unrecognised flag")), \
+    return bool(findings_matching(result, "ignores an unrecognized flag")), \
         f"findings={result['findings']}"
 
 
@@ -437,8 +437,8 @@ def case_a_refusing_set_records_that_it_refused(work):
                          modules=["alpha"], control_sets=[("alpha", CONFORMING)])
     result = audit_module.audit(root, external_control_sets={}, known_uncovered=set())
     record = result["control_sets"][0]
-    return record.get("refuses_unrecognised_flag") is True, \
-        f"record={record.get('refuses_unrecognised_flag')} findings={result['findings']}"
+    return record.get("refuses_unrecognized_flag") is True, \
+        f"record={record.get('refuses_unrecognized_flag')} findings={result['findings']}"
 
 
 def case_arms_that_cannot_be_listed_are_a_finding(work):
@@ -533,7 +533,7 @@ def case_report_names_every_control_set_it_ran(work):
             and "sabotage breaks-the-predicate" in text), f"report={text!r}"
 
 
-def case_a_control_set_is_recognised_by_its_arm_table(work):
+def case_a_control_set_is_recognized_by_its_arm_table(work):
     """The card's fixture: two files of identical structure, one spelled otherwise.
 
     `alpha.py` is guarded by `alpha_selftest.py` and `beta.py` by `control.py`. Before
@@ -553,7 +553,7 @@ def case_a_control_set_is_recognised_by_its_arm_table(work):
 
 
 def case_an_unsuffixed_control_set_has_its_arms_run(work):
-    """Recognising it is worth nothing on its own — the point is that its arms run."""
+    """Recognizing it is worth nothing on its own — the point is that its arms run."""
     root = build_fixture(
         os.path.join(work, "armtablearms"), modules=["beta"],
         extra_files=[("control.py", CONFORMING)],
@@ -641,12 +641,12 @@ def case_a_local_named_arms_does_not_promote_a_module(work):
     root = build_fixture(
         os.path.join(work, "localarms"), modules=["alpha"],
         control_sets=[("alpha", CONFORMING)],
-        extra_files=[("summariser.py", MODULE_WITH_A_LOCAL_CALLED_ARMS)],
+        extra_files=[("summarizer.py", MODULE_WITH_A_LOCAL_CALLED_ARMS)],
     )
     result = audit_module.audit(root, external_control_sets={},
-                                known_uncovered={"summariser"}, unsuffixed_control_sets={})
+                                known_uncovered={"summarizer"}, unsuffixed_control_sets={})
     ran = {record["module"] for record in result["control_sets"]}
-    return ("summariser" not in ran and result["uncovered"] == ["summariser"]), \
+    return ("summarizer" not in ran and result["uncovered"] == ["summarizer"]), \
         f"ran={sorted(ran)} uncovered={result['uncovered']} findings={result['findings']}"
 
 
@@ -780,7 +780,7 @@ CASES = [
     ("an absent go toolchain refuses the audit", case_absent_go_toolchain_refuses_the_audit),
     ("mise's shims supply the toolchain", case_shim_directory_supplies_the_toolchain),
     ("a finding makes main exit 1", case_findings_make_main_exit_one),
-    ("a control set is recognised by its arm table", case_a_control_set_is_recognised_by_its_arm_table),
+    ("a control set is recognized by its arm table", case_a_control_set_is_recognized_by_its_arm_table),
     ("an unsuffixed control set has its arms run", case_an_unsuffixed_control_set_has_its_arms_run),
     ("an unattributed control set is a finding", case_an_unattributed_control_set_is_a_finding),
     ("the registry attributes an unsuffixed control set", case_the_registry_attributes_an_unsuffixed_control_set),
@@ -808,7 +808,7 @@ def _sabotage_read_only_the_exit_code():
 
 def _sabotage_assume_the_sabotage_flag():
     """Skip the capability probe. A flag-ignoring control set then looks conforming."""
-    audit_module.probe_sabotage_flag = lambda path: {"honoured": True,
+    audit_module.probe_sabotage_flag = lambda path: {"honored": True,
                                                     "harness_break": None}
 
 
@@ -850,11 +850,11 @@ def _sabotage_trust_the_arm_list():
 def _sabotage_assume_the_flag_was_read():
     """Assume every control set read the flag it was sent.
 
-    This is the predicate `refuses_an_unrecognised_flag` exists to be. Without it the
+    This is the predicate `refuses_an_unrecognized_flag` exists to be. Without it the
     audit copes with a flag-ignoring control set in silence, which is how three of the
     four kept the dialect for as long as they did.
     """
-    audit_module.refuses_an_unrecognised_flag = lambda path: True
+    audit_module.refuses_an_unrecognized_flag = lambda path: True
 
 
 def _sabotage_a_missing_control_set_is_a_skip():
@@ -901,7 +901,7 @@ def _sabotage_a_missing_toolchain_is_someone_elses_problem():
 def _sabotage_classify_by_the_suffix_alone():
     """The defect card `da86b1ab` names: decide control-set-or-module by the spelling.
 
-    ⚠️ This restores the old *behaviour* and keeps the current return shape. Deleting
+    ⚠️ This restores the old *behavior* and keeps the current return shape. Deleting
     the extra fields instead would make `audit` raise on every case, and a control set
     that reads only "did the case fail" cannot tell a caught defect from an instrument
     it stopped from running at all.
@@ -1031,7 +1031,7 @@ def _sabotage_a_traceback_is_a_verdict():
 
 
 def _sabotage_the_capability_probe_swallows_a_crash():
-    """Let a crashing control set count as one that honours `--sabotage`.
+    """Let a crashing control set count as one that honors `--sabotage`.
 
     Narrower than the arm above: only the probe stops seeing the break, so the set is
     declared conforming and its arms are listed and run. `read_sabotage_verdict` still
@@ -1043,7 +1043,7 @@ def _sabotage_the_capability_probe_swallows_a_crash():
     def swallows(path):
         answer = real(path)
         if answer["harness_break"]:
-            return {"honoured": True, "harness_break": None}
+            return {"honored": True, "harness_break": None}
         return answer
 
     audit_module.probe_sabotage_flag = swallows

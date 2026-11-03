@@ -125,7 +125,7 @@ func TestMisconfiguredCheckDoesNotDriveAutoRestart(t *testing.T) {
 }
 
 // TestCheckSystemdReportsRealRunningUnit guards the other direction: the new
-// LoadState-based probe must still recognise a genuinely healthy unit, and must
+// LoadState-based probe must still recognize a genuinely healthy unit, and must
 // not trip over a unit whose drop-in is root-only (`systemctl cat` exits
 // non-zero on a permission-denied drop-in even though the unit loads fine —
 // which is exactly why this code does not shell out to `cat`).

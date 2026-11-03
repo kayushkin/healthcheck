@@ -16,7 +16,7 @@ success from the outside:
   * a classifier that screens everything out -> zero scored blocks -> **a clean fleet**.
 
 So each arm below drives the whole program and asserts on its exit code, and the arms
-that matter are the ones that must NOT be zero. `--list-arms` names them; an unrecognised
+that matter are the ones that must NOT be zero. `--list-arms` names them; an unrecognized
 flag is refused with exit 2 rather than run anyway.
 
 Every arm builds its own repository under a temporary root and points the guard at it
@@ -241,12 +241,12 @@ def arm_controls_run_by_default(root):
     return True, "controls and pins both ran and passed"
 
 
-def arm_unrecognised_flag_is_refused(root):
+def arm_unrecognized_flag_is_refused(root):
     """An argument the guard does not know must be refused, not ignored."""
     code, output = run_guard(root, ["--recount-everything-twice"])
     if code != 2:
         return False, "expected exit 2 on an unknown flag, got %d\n%s" % (code, output)
-    return True, "exit 2 on an unrecognised flag"
+    return True, "exit 2 on an unrecognized flag"
 
 
 ARMS = [
@@ -258,7 +258,7 @@ ARMS = [
     ("nothing-scorable-refuses", arm_nothing_scorable_refuses),
     ("unsound-controls-stop-the-run", arm_unsound_controls_stop_the_run),
     ("controls-run-by-default", arm_controls_run_by_default),
-    ("unrecognised-flag-is-refused", arm_unrecognised_flag_is_refused),
+    ("unrecognized-flag-is-refused", arm_unrecognized_flag_is_refused),
 ]
 
 

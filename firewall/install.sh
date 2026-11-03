@@ -7,7 +7,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ "${1:-}" == "--confirm" ]]; then
   sudo systemctl stop host-firewall-rollback.timer 2>/dev/null || true
-  echo "rollback cancelled; the firewall stays"
+  echo "rollback canceled; the firewall stays"
   exit 0
 fi
 

@@ -18,7 +18,7 @@ enough to run in twenty seconds and run once a year is not a cheap check; it is 
 nothing. The card's own words: *"A recount is worth automating because it is cheap enough
 to run every time."*
 
-The scorer's modules travelled with it into `markdown_tally_recount/` beside this file,
+The scorer's modules traveled with it into `markdown_tally_recount/` beside this file,
 rather than being imported out of the pass directory. `~/.nightly-*` is under no version
 control (card `4707e6f3`), so a guard reaching into it is a guard one `rm -rf` away from
 either dying or -- worse -- quietly scoring an older copy.

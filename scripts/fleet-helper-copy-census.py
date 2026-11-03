@@ -93,7 +93,7 @@ def functions_in(source):
 
 
 def signature_of(function_text):
-    """Normalise a function so a copy still matches after a RENAME.
+    """Normalize a function so a copy still matches after a RENAME.
 
     The copilotcli repair renamed `truncate` to `truncateAtRuneBoundary`, so
     matching on the name would report the repaired sibling as absent. Comments

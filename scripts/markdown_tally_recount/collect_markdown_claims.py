@@ -64,7 +64,7 @@ VENDORED = {"happy", "claude-squad"}
 
 MARKDOWN_SUFFIXES = (".md", ".markdown")
 
-# Checked in but not authored here: build output, vendored trees, dependency licences.
+# Checked in but not authored here: build output, vendored trees, dependency licenses.
 EXCLUDED_PATH_PARTS = (
     "node_modules/", "/dist/", "dist/", "/build/", "vendor/",
     "/testdata/", "third_party/", "/generated/", "LICENSE",

@@ -23,7 +23,7 @@ A cheap check nobody runs is not cheaper than an expensive one; it is worth noth
    list with a hole in it, and it fails this audit.
 
 3. **Which control sets did not get their sabotage arms run, and why.** A control set
-   that does not honour `--sabotage` cannot be asked what its arms are, so this script
+   that does not honor `--sabotage` cannot be asked what its arms are, so this script
    runs its clean arm only and *says so per control set*. An unrun arm and a passing
    arm read alike, and only one of them is a fact.
 
@@ -40,14 +40,14 @@ A cheap check nobody runs is not cheaper than an expensive one; it is worth noth
    or `CONTROL_ARMS` — and `discover` reads that off the ast without importing
    anything. Until 2026-08-31 it read the `_selftest` suffix instead, and card
    `da86b1ab` measured what that costs: a control set spelled otherwise is not
-   recognised, so **none of its arms is ever run**, and it is then counted as a module
+   recognized, so **none of its arms is ever run**, and it is then counted as a module
    needing a guard of its own. One spelling, two wrong answers, and the docstring above
    is the argument against the first of them — a cheap check nobody runs is worth
    nothing. Latent at 0 of 25 the day it was found, because every control set in the
    root is spelled `<module>_selftest.py`; it fires on the next promotion that is not.
    The suffix still answers the *other* question — which module a control set guards —
    because nothing structural does. `UNSUFFIXED_CONTROL_SETS` carries that answer where
-   the name cannot, and a recognised control set with neither runs its arms and is
+   the name cannot, and a recognized control set with neither runs its arms and is
    reported as covering nothing, rather than being quietly attributed to a guess.
 
 ## ⛔ The exit code does not carry the verdict, and it differs per control set
@@ -58,7 +58,7 @@ taken with the status captured into a variable on its own line — reading `$?` 
 string that also holds a `$(...)` substitution gives you the substitution's status, and
 that mis-measured this very table once:
 
-    control set                            unrecognised  unknown   --list-     caught
+    control set                            unrecognized  unknown   --list-     caught
                                                flag        arm    sabotages   sabotage
     ~/.nightly-348-buildtags/selftest.py    0 -> 2          2         0           0
     reach_control_selftest.py               0 -> 2          2         0           0
@@ -89,7 +89,7 @@ the run went GREEN with zero findings. Reproduced end to end before repair.
 outcome `harness-break` — a finding, never a catch and never a hole. The same reading
 guards the `--sabotage` capability probe, which had the defect in its sharpest form: a
 control set that crashed on the nonsense arm exited non-zero, was therefore declared to
-honour the flag, had its arms listed and run, and every one of those arms crashed and
+honor the flag, had its arms listed and run, and every one of those arms crashed and
 was graded caught. `worktree_cost_selftest.py` is the box's worked example of a control
 set reporting this shape about itself.
 
@@ -100,11 +100,11 @@ and is not an unattended call. This repair makes the audit stop misreading them;
 does not make them speak.
 
 **The `->` columns are what card `3165bed1` closed on 2026-08-22.** THREE of the four
-ignored an unrecognised flag — not two, as this docstring said before it was re-measured
+ignored an unrecognized flag — not two, as this docstring said before it was re-measured
 — and printed their ordinary green report, so `--list-sabotages` against them yielded
 that report and an unguarded reader parsed its prose into sabotage names. All four now
-refuse an unrecognised flag with exit 2 and answer `--list-sabotages`, and
-`refuses_an_unrecognised_flag` below makes a set that stops doing so a **finding**
+refuse an unrecognized flag with exit 2 and answer `--list-sabotages`, and
+`refuses_an_unrecognized_flag` below makes a set that stops doing so a **finding**
 rather than a silence. `unbuilt_test_scope_selftest.py` implemented none of the three
 probes; giving it `--sabotage <name>` took this audit from 25 arms to 34, because its
 nine arms could not be reached from outside before.
@@ -173,7 +173,7 @@ EXTERNAL_CONTROL_SETS = {
 }
 
 # Modules in the root that had no control set when this script was written. Each entry
-# is a standing gap, not a licence: the audit fails if the list stops matching what is
+# is a standing gap, not a license: the audit fails if the list stops matching what is
 # on disk in either direction. `citation_screen` and `stale_identifier_neighbourhood`
 # are here because `~/.nightly-shared/README.md` calls their controls "in-file" and
 # neither file contains one — their controls live scattered in `~/.nightly-*` pass
@@ -200,7 +200,7 @@ ARM_TABLE_NAMES = frozenset({
 
 # Control sets that live in the root and whose filename does not carry the `_selftest`
 # suffix, so nothing in the name says which module they guard. The structural channel
-# recognises them as control sets and runs them either way; this registry is the only
+# recognizes them as control sets and runs them either way; this registry is the only
 # thing that can say what they cover, so without an entry the module they guard is
 # still reported uncovered. Empty today — every control set in the root is spelled
 # `<module>_selftest.py` — and, like the two registries above, the audit fails if it
@@ -231,7 +231,7 @@ def ensure_go_toolchain_on_path():
     control sets die with `FileNotFoundError: 'go'` and the audit reports three red
     clean arms. That reads as three broken instruments and is nothing of the kind — the
     probe could not run, and a probe that could not run is not a negative result (215th
-    pass). So a missing toolchain refuses the whole audit rather than colouring it.
+    pass). So a missing toolchain refuses the whole audit rather than coloring it.
     """
     if find_executable("go"):
         return None
@@ -316,7 +316,7 @@ def discover(root, unsuffixed_control_sets=None):
     ⛔ **Classification is structural; only attribution reads the name.** Until
     2026-08-31 this function decided both questions off the `_selftest` suffix, and a
     control set spelled anything else got two wrong answers at once: it was not
-    recognised as a control set, so none of its arms ever ran, and it was then counted
+    recognized as a control set, so none of its arms ever ran, and it was then counted
     as a module needing a guard of its own. Latent at 0 of 25 when it was found — every
     control set in the root is spelled `<module>_selftest.py` — and card `da86b1ab`
     names the promotion it fires on. A file that declares an arm table is a control set
@@ -359,7 +359,7 @@ def discover(root, unsuffixed_control_sets=None):
         elif filename in unsuffixed_control_sets:
             control_sets[unsuffixed_control_sets[filename]] = path
         else:
-            # Recognised, so it will be run; unattributed, so it covers nothing. Keyed
+            # Recognized, so it will be run; unattributed, so it covers nothing. Keyed
             # by its own stem to keep it out of `modules` and to give the report a name
             # to print — never by the module it might guard, which is the guess.
             unattributed[stem] = path
@@ -500,8 +500,8 @@ def read_sabotage_verdict(arm):
 NONSENSE_SABOTAGE = "__no_such_sabotage_arm__"
 
 # A flag no control set can implement. Distinct from NONSENSE_SABOTAGE above: that one
-# asks whether `--sabotage` is honoured, this one asks whether an argument the control
-# set does not recognise is refused at all.
+# asks whether `--sabotage` is honored, this one asks whether an argument the control
+# set does not recognize is refused at all.
 NONSENSE_FLAG = "--__no_such_flag_on_any_control_set__"
 
 # `main` runs this script's own control set before auditing anything, and that control
@@ -519,7 +519,7 @@ def run_own_control_set(stream=None):
     """Run this script's control set — clean arm and every sabotage — before auditing.
 
     An audit whose own instrument is broken cannot be read, whichever way it answers, so
-    a red here stops the run rather than colouring it. A missing control set is the same
+    a red here stops the run rather than coloring it. A missing control set is the same
     thing and is reported as one: 'the control set is gone' and 'the control set passed'
     must never print alike.
     """
@@ -566,53 +566,53 @@ def run_own_control_set(stream=None):
 def probe_sabotage_flag(path):
     """Does this control set implement `--sabotage`, ignore it, or crash on it?
 
-    Two of the four control sets on this box ignore an argument they do not recognise
+    Two of the four control sets on this box ignore an argument they do not recognize
     and print their ordinary green report. Asking one of those for `--list-sabotages`
     returns its whole report, and a reader that splits it into words gets sabotage arms
     named `CAUGHT`, `GREEN` and `9/9`. So capability is probed, never assumed: a
-    control set that honours the protocol must refuse an arm that cannot exist.
+    control set that honors the protocol must refuse an arm that cannot exist.
 
     Three outcomes, not two, and the third is why this is no longer a predicate called
-    `honours_sabotage_flag`. A control set that raises on the nonsense arm exits
+    `honors_sabotage_flag`. A control set that raises on the nonsense arm exits
     non-zero, which the old reading took for the clean refusal it was hoping for — so a
     crashing control set was declared conforming, its arms were listed and run, and
     every one of those arms crashed too and was graded a caught sabotage. That is card
     `43a460d2` in one call: the probe and the verdict read the same channel, and a
     harness break is louder on it than either answer.
 
-    Returns `{"honoured": bool, "harness_break": str or None}`. A break is reported by
+    Returns `{"honored": bool, "harness_break": str or None}`. A break is reported by
     the caller and never counted as either answer.
     """
     arm = run_arm([sys.executable, path, "--sabotage", NONSENSE_SABOTAGE], "probe")
     if arm["timed_out"]:
-        return {"honoured": False, "harness_break": None}
+        return {"honored": False, "harness_break": None}
     broke = harness_break_line(arm["output"])
     if broke:
-        return {"honoured": False, "harness_break": broke}
+        return {"honored": False, "harness_break": broke}
     # Either channel is enough, because the two conforming dialects use different ones:
     # a non-zero exit, or a line saying the name is not one of its arms.
-    honoured = arm["exit_code"] != 0 or "unknown sabotage" in arm["output_tail"].lower()
-    return {"honoured": honoured, "harness_break": None}
+    honored = arm["exit_code"] != 0 or "unknown sabotage" in arm["output_tail"].lower()
+    return {"honored": honored, "harness_break": None}
 
 
-def refuses_an_unrecognised_flag(path):
+def refuses_an_unrecognized_flag(path):
     """Does this control set refuse an argument it does not know, or run anyway?
 
-    A control set that ignores an unrecognised flag answers every question with its
-    ordinary green report, so no caller can tell an honoured flag from an ignored one —
+    A control set that ignores an unrecognized flag answers every question with its
+    ordinary green report, so no caller can tell an honored flag from an ignored one —
     and the ignored reading is the green one. `--list-sabotages` against such a set
     hands back its whole suite report, and a reader that splits that into words gets
     sabotage arms called `ok`, `CLEAN:` and `9/9`, runs each, and reads the resulting
     refusals as caught sabotages. That is what this audit's own first draft did, and it
-    printed 25 findings that were all artefacts.
+    printed 25 findings that were all artifacts.
 
     The refusal has to be in the **exit code**. A control set that prints a complaint
     and exits 0 is still green to every caller reading the status, which is the same
     defect one layer down. Three of the four control sets on this box ignored an
-    unrecognised flag until card `3165bed1`; all four refuse one now, so this predicate
+    unrecognized flag until card `3165bed1`; all four refuse one now, so this predicate
     guards a property rather than describing one.
     """
-    arm = run_arm([sys.executable, path, NONSENSE_FLAG], "probe-unrecognised-flag")
+    arm = run_arm([sys.executable, path, NONSENSE_FLAG], "probe-unrecognized-flag")
     if arm["timed_out"]:
         return False
     return arm["exit_code"] != 0
@@ -625,8 +625,8 @@ def list_sabotages(path, clean_output):
     None means the control set cannot be asked, the empty list means it was asked and
     has none. Only called once `probe_sabotage_flag` has said `--sabotage` is real.
 
-    Honouring `--sabotage` does not imply honouring `--list-sabotages`, and one of the
-    four control sets on this box honours the first and ignores the second: it runs its
+    Honoring `--sabotage` does not imply honoring `--list-sabotages`, and one of the
+    four control sets on this box honors the first and ignores the second: it runs its
     whole suite instead, so an unguarded reader turns its report into sabotage arms
     called `ok` and `CLEAN:`, runs each, gets a `KeyError` traceback per arm, and reads
     every one of those tracebacks as a caught sabotage. `clean_output` is what makes
@@ -648,7 +648,7 @@ def list_sabotages(path, clean_output):
     listed = finished.stdout.decode("utf-8", "replace")
     # Compare against a fresh clean run as well as the stored one: a control set whose
     # report carries a duration or a count that moves between runs would otherwise
-    # never match, and the flag would read as honoured on every control set.
+    # never match, and the flag would read as honored on every control set.
     if listed == clean_output or listed == clean_arm["output"]:
         return None
     names = []
@@ -751,10 +751,10 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
         # control set can be asked anything at all. A set that ignores it still gets
         # its clean arm and its sabotage probes — the existing capability probes cope
         # with the old dialect — but the report no longer stays silent about it.
-        record["refuses_unrecognised_flag"] = refuses_an_unrecognised_flag(path)
-        if not record["refuses_unrecognised_flag"]:
+        record["refuses_unrecognized_flag"] = refuses_an_unrecognized_flag(path)
+        if not record["refuses_unrecognized_flag"]:
             result["findings"].append(
-                f"{module}: ignores an unrecognised flag and runs its ordinary report,"
+                f"{module}: ignores an unrecognized flag and runs its ordinary report,"
                 f" so no flag sent to it can be shown to have been read"
             )
 
@@ -788,17 +788,17 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
             record["sabotages_run"] = False
             record["sabotages_unrun_because"] = (
                 "the control set crashed on the capability probe, so whether it "
-                "honours --sabotage is unknown rather than answered"
+                "honors --sabotage is unknown rather than answered"
             )
             result["findings"].append(
                 f"{module}: crashed on the --sabotage capability probe instead of "
                 f"refusing an arm that cannot exist: {flag_probe['harness_break']}"
             )
             continue
-        if not flag_probe["honoured"]:
+        if not flag_probe["honored"]:
             record["sabotages_run"] = False
             record["sabotages_unrun_because"] = (
-                "the control set does not honour --sabotage; it ignored an arm that "
+                "the control set does not honor --sabotage; it ignored an arm that "
                 "cannot exist. Whether its arms ran inside the clean run is not "
                 "something this audit can see"
             )
@@ -808,7 +808,7 @@ def audit(root, sabotage_arms=True, external_control_sets=None, known_uncovered=
         if names is None:
             record["sabotages_run"] = False
             record["sabotages_unrun_because"] = (
-                "the control set honours --sabotage but will not list its arms"
+                "the control set honors --sabotage but will not list its arms"
             )
             result["findings"].append(
                 f"{module}: has sabotage arms and no --list-sabotages, so none of them ran"
@@ -943,7 +943,7 @@ def main(argv):
 
     result = audit(root, sabotage_arms=not args.no_sabotage_arms)
     if args.json:
-        # The full arm output is kept in memory so the flag-honoured comparison can
+        # The full arm output is kept in memory so the flag-honored comparison can
         # read it; it is megabytes of suite chatter and does not belong in the result.
         for record in result["control_sets"]:
             for arm in record["arms"]:

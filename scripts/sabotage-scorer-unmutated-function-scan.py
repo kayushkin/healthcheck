@@ -46,7 +46,7 @@ scorers (chat-core, miditab) target TypeScript and are out of this scan's reach.
 Card 0c9ead3e asked whether other repos carry miditab's per-file gut. **None
 does** — every plan on this box is already per-mechanism in shape, and the only
 whole-file guts anywhere are in miditab's own `control-positive-per-file.json`,
-which is labelled as that and exists to be one.
+which is labeled as that and exists to be one.
 
 The plans split in two, and only one half can carry the defect:
 
@@ -54,7 +54,7 @@ The plans split in two, and only one half can carry the defect:
     `sabotage-identity.py` family, 13 repos. These score ONE mechanism at its
     several call sites, so they name 1–3 functions per file however large the
     file is: inber-party's truncation scorer names 1 of 117 functions in
-    `internal/api/api.go` and 7 of 180 overall. **That is correct behaviour, not
+    `internal/api/api.go` and 7 of 180 overall. **That is correct behavior, not
     a gap**, and this scan reports it identically to a real one.
   - **Per-binary plans** — the scheduler family, which targets one
     `cmd/X/main.go` and claims it, so a silent region is a real hole. Measured:
@@ -127,7 +127,7 @@ answer rather than by the scorer name.
    Non-Go targets are counted and reported as unparsed, never silently skipped.
 3. **`main` is one function like any other.** In these cmd binaries it is often
    the largest, and a plan that deliberately leaves orchestration alone will
-   show it here. That is a judgement per hit, which is why this prints names
+   show it here. That is a judgment per hit, which is why this prints names
    rather than only a count.
 
 ## It takes no tree hold, and that is a measurement rather than an omission
@@ -232,7 +232,7 @@ def scorer_blobs(repo):
     return blobs
 
 
-def _normalise(raw):
+def _normalize(raw):
     return raw.strip().lstrip("./").rstrip("/")
 
 
@@ -266,7 +266,7 @@ def _docstring_nodes(tree):
     return marked
 
 
-def analyse(source):
+def analyze(source):
     """(candidate targets, needles) — paths a scorer might break, and its literals.
 
     A candidate is any non-docstring literal naming a `.go` file, plus the
@@ -294,12 +294,12 @@ def analyse(source):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             joined = _path_from_division(node)
             if joined and joined.endswith(".go"):
-                targets.add(_normalise(joined))
+                targets.add(_normalize(joined))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value
             if (id(node) not in docstrings and value.endswith(".go")
                     and "\n" not in value):
-                targets.add(_normalise(value))
+                targets.add(_normalize(value))
 
     needles = set()
     for node in ast.walk(tree):
@@ -362,7 +362,7 @@ def scan(root):
         for (path, sha), refs in sorted(scorer_blobs(repo).items()):
             source = _git(repo, "cat-file", "-p", sha)
             try:
-                targets, needles = analyse(source)
+                targets, needles = analyze(source)
             except SyntaxError as exc:
                 rows.append({"repo": repo_name, "path": path, "sha": sha,
                              "refs": sorted(refs), "error": str(exc)})
@@ -375,7 +375,7 @@ def scan(root):
                 # A candidate that the ref does not carry is not a target this
                 # scorer breaks — it is a path named in prose, a self-test
                 # fixture, or a file that branch predates. Dropping it is the
-                # filter; see analyse().
+                # filter; see analyze().
                 # Three conventions for what a target path is relative to, all
                 # live on this box: the repository root (most scorers, which say
                 # REPO = Path(__file__).parent.parent from scripts/); the
@@ -472,7 +472,7 @@ def report(rows, verbose=False):
 
     # See the docstring: the exit status reports whether the scan could measure,
     # NOT whether it found a silent region. A silent region is only a defect if
-    # the plan claimed to cover the file, which is a judgement this scan cannot
+    # the plan claimed to cover the file, which is a judgment this scan cannot
     # make, so encoding it here would be a claim the code cannot support.
     could_not_measure = unparsed + unmeasurable
     if could_not_measure:
@@ -538,7 +538,7 @@ def self_test():
     """
     failures = []
 
-    targets, needles = analyse(SELF_TEST_SCORER)
+    targets, needles = analyze(SELF_TEST_SCORER)
     if targets != {"cmd/thing/main.go"}:
         failures.append("targets read as %s, want the one segmented path" % sorted(targets))
     if "cmd/thing/silent.go" in needles:

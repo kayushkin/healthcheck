@@ -141,7 +141,7 @@ if "executables_scanned" not in report:
 #
 #     executables_scanned == artifacts_total + len(skipped_not_go)
 #
-# It is an identity, not a policy. It passes no judgement on whether excluding a
+# It is an identity, not a policy. It passes no judgment on whether excluding a
 # non-Go executable is reasonable — only that every candidate left the sweep by a
 # route the report names. When it fails, something stopped being covered through
 # a path nobody wrote down.

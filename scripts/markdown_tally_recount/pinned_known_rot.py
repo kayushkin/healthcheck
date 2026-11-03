@@ -14,7 +14,7 @@ from score_tallies import score, table_beneath, population_beneath
 
 # The pre-repair text of `~/CLAUDE.md` is a FIXTURE, not a document to re-read: the
 # file on disk is repaired and reading it would score the repair rather than the rot.
-# It travelled with this package out of `~/.nightly-293/` so a run does not depend on
+# It traveled with this package out of `~/.nightly-293/` so a run does not depend on
 # an unversioned pass directory still existing.
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 

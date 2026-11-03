@@ -53,7 +53,7 @@ fix/ branches, so a working-tree scan would miss almost all of them. This walks
 every local and remote ref with `git ls-tree` and dedupes by blob hash, then
 reports which refs carry each version.
 
-## How a target is recognised, and where that can be wrong
+## How a target is recognized, and where that can be wrong
 
 Scorers declare targets in at least two shapes:
 
@@ -68,7 +68,7 @@ slash in it. That was the scan's defect, not theirs, and it pointed the finger a
 two innocent repos. Hence the `--self-test`, which carries that exact shape.
 
 ⚠️ **The scan's own blind spot, stated rather than left to be discovered.** It
-recognises paths that are literal in the source. A scorer that computes a target
+recognizes paths that are literal in the source. A scorer that computes a target
 at runtime — from a glob, an argv, a loop over a directory — reads to this scan
 as a scorer with fewer targets than it has, which makes a gap look real when it
 is not. Every scorer on this box today is literal; the day one is not, this
@@ -149,7 +149,7 @@ def scorer_blobs(repo):
     return blobs
 
 
-def _normalise(raw):
+def _normalize(raw):
     return raw.strip().lstrip("./").rstrip("/")
 
 
@@ -181,7 +181,7 @@ def _docstring_nodes(tree):
     return marked
 
 
-def analyse(source):
+def analyze(source):
     """(targets, packages) — the files a scorer breaks and the packages it runs."""
     tree = ast.parse(source)
     docstrings = _docstring_nodes(tree)
@@ -192,19 +192,19 @@ def analyse(source):
             if any(isinstance(t, ast.Name) and t.id == "PACKAGES" for t in node.targets):
                 for element in ast.walk(node.value):
                     if isinstance(element, ast.Constant) and isinstance(element.value, str):
-                        packages.add(_normalise(element.value))
+                        packages.add(_normalize(element.value))
 
     targets = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             joined = _path_from_division(node)
             if joined and joined.endswith(".go"):
-                targets.add(_normalise(joined))
+                targets.add(_normalize(joined))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value
             if (id(node) not in docstrings and value.endswith(".go")
                     and "/" in value and "\n" not in value):
-                targets.add(_normalise(value))
+                targets.add(_normalize(value))
     return targets, packages
 
 
@@ -224,7 +224,7 @@ def scan(root, verbose=False):
         for (path, sha), refs in sorted(scorer_blobs(repo).items()):
             source = _git(repo, "cat-file", "-p", sha)
             try:
-                targets, packages = analyse(source)
+                targets, packages = analyze(source)
             except SyntaxError as exc:
                 rows.append((name, path, sha, sorted(refs), set(), set(), None, str(exc)))
                 continue
@@ -255,7 +255,7 @@ def report(rows, verbose=False):
     exempt = [r for r in rows if not r[7] and not r[4] and not r[5]]
     for row in needs_reading:
         print("  ⚠️  %s %s @%s declares packages but no target this scan can see — "
-              "read it by hand; the scan only recognises literal paths"
+              "read it by hand; the scan only recognizes literal paths"
               % (row[0], row[1], row[2][:8]))
     if exempt:
         print("  %d scorer versions declare no PACKAGES and so cannot carry this gap"
@@ -318,14 +318,14 @@ def self_test():
     """
     failures = []
 
-    targets, packages = analyse(SELF_TEST_WITH_GAP)
+    targets, packages = analyze(SELF_TEST_WITH_GAP)
     uncovered = uncovered_packages(targets, packages)
     if targets != {"cmd/thing/main.go"}:
         failures.append("single-literal target not read: got %s" % sorted(targets))
     if uncovered != ["internal/shared"]:
         failures.append("the planted gap was not reported: got %s" % uncovered)
 
-    targets, packages = analyse(SELF_TEST_SEGMENTED)
+    targets, packages = analyze(SELF_TEST_SEGMENTED)
     uncovered = uncovered_packages(targets, packages)
     if targets != {"internal/shared/helper.go"}:
         failures.append("segment-built target not reconstructed: got %s" % sorted(targets))

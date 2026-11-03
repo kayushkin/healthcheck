@@ -93,7 +93,7 @@ print("\n--- pair 4: the row count is read, not assumed ---")
 r = run("All five widgets are listed below:", [ROW] * 5)
 check("baseline", r["verdict"], r["reason"], "MATCH")
 saved_table = score_tallies.TABLE_SEPARATOR_RULE
-# Sabotage: stop recognising the `|---|` rule, so it is counted as a body row.  A scorer
+# Sabotage: stop recognizing the `|---|` rule, so it is counted as a body row.  A scorer
 # whose row count came from anywhere but the table would not move.
 score_tallies.TABLE_SEPARATOR_RULE = score_tallies.re.compile(r"^(?!)")
 try:

@@ -21,7 +21,7 @@ moving it into a repo with a home and an owner — and a later append settled th
 first and third are not exclusive: the six `repo-*` guards are scheduler shell jobs whose
 scripts live in this repo. That is what this is.
 
-`~/.nightly-*` is under no version control (card `4707e6f3`), so the modules travelled
+`~/.nightly-*` is under no version control (card `4707e6f3`), so the modules traveled
 here rather than being imported across. A guard reaching into a pass directory is one
 `rm -rf` away from dying, or worse, from quietly scoring a stale copy.
 
@@ -38,7 +38,7 @@ here rather than being imported across. A guard reaching into a pass directory i
 
 Three things, all of them because a scheduled run is not a hand run:
 
-1. **`REPOS_ROOT` honours `MARKDOWN_TALLY_REPOS_ROOT`.** Without it there is no way to
+1. **`REPOS_ROOT` honors `MARKDOWN_TALLY_REPOS_ROOT`.** Without it there is no way to
    drive the guard over a repository built for the purpose, and therefore no way to see
    it report a MISMATCH. A guard nobody has watched go red is a guard nobody can trust
    going green.

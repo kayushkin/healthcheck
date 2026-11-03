@@ -40,7 +40,7 @@ Direction matters and only one direction is evidence:
 
 A hit is still a CANDIDATE. The branch may have deleted the line while doing
 something else, and "the literal is gone" is not "the card is resolved". The
-judgement is a read of that branch's diff. This scan exists to shrink the
+judgment is a read of that branch's diff. This scan exists to shrink the
 population you have to read.
 
 Reproduce:

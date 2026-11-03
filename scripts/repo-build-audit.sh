@@ -112,7 +112,7 @@
 #                    clone of HEAD once the tag is passed — measured 2026-08-31 at
 #                    job-store 5bf43c3 and quote-store 5d0491c. Reading these two as
 #                    broken trees is the mistake this paragraph exists to stop.
-#                    Whether this sweep should honour a repo's declared tags is an
+#                    Whether this sweep should honor a repo's declared tags is an
 #                    open decision, not an oversight: noteboard todo
 #                    31d3f545-2f47-4d87-ae81-fe9388880f23 states it, and this file
 #                    already argues BOTH sides of it — "build with DEFAULT flags"
@@ -1041,7 +1041,7 @@ no_smoke=0   # smoke mode only: repos with a committed HEAD but no smoke to run
 files_scanned=0
 generated_with_nul=()   # "<repo>/<path>\t<nul count>" — named, never failed
 # node mode only: packages that install and build but declare no `check` script,
-# so nothing in this sweep executes an assertion about their behaviour. Named in
+# so nothing in this sweep executes an assertion about their behavior. Named in
 # the report rather than counted as ok-and-done, for the same reason --smoke
 # names the repos it has no smoke for: an uncovered package that goes unnamed is
 # read as a covered one.
@@ -1736,7 +1736,7 @@ for path in ${repo_dirs+"${repo_dirs[@]}"}; do
       #
       # The `grep -v '^#'` is kept: it drops go build's `# package/path` headers
       # while the `.go:NN:` line under each one carries the actual error.
-      # Falls back to the old behaviour when nothing matches, so a stage that
+      # Falls back to the old behavior when nothing matches, so a stage that
       # fails in a shape nobody anticipated still reports something, not nothing.
       detail=$(echo "$STAGE_OUT" | grep -v '^#' \
         | grep -E '\.go:[0-9]+:|^--- FAIL:|^FAIL[[:space:]]|^panic:' \
@@ -1927,7 +1927,7 @@ if mode != "node":
     #                        + len(without_main_package)    (smoke)
     #                        + skipped_by_only
     #
-    # It is an identity, not a policy — no judgement about whether an exclusion
+    # It is an identity, not a policy — no judgment about whether an exclusion
     # is acceptable, only that every directory left by a route somebody wrote
     # down. If it does not close, a directory vanished through a path that is
     # not in this list, which is the exact defect this whole family exists to

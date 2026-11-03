@@ -342,7 +342,7 @@ candidates="$(printf '%s%s' "$candidates" "$running_bins" | sort -u | sed '/^$/d
 #      remote-tracking ref;
 #   2. a local `main`, then a local `master` — for the repos with no origin
 #      remote at all (job-store, quote-store, prediction-store);
-#   3. HEAD, the old behaviour, for a repo where none of those exist — and the
+#   3. HEAD, the old behavior, for a repo where none of those exist — and the
 #      row says so, because the point is knowing which yardstick was used.
 # Prints "<ref> <display name>" (space-separated; refs contain no spaces).
 default_branch_ref() {

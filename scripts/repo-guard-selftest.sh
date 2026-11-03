@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# repo-guard-selftest — pin the behaviour of this box's repo guards against
+# repo-guard-selftest — pin the behavior of this box's repo guards against
 # fixtures, without touching ~/repos.
 #
 # It started as a test of one sweep's repository-discovery rules and grew, one
