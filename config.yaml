@@ -19,6 +19,27 @@ resources:
     threshold: 90
     cc_agent: true
 
+# Drives, batteries and reporting of every machine connected to the bridge at
+# llm_bridge_url, and of the machines on the servers it is connected to. Each
+# becomes a resource in /api/status and alerts like disk-root, after
+# alert_threshold bad checks in a row. healthcheck reads the bridge's operator
+# routes, so the unit needs LLMBRIDGE_SERVICE_TOKEN in its environment, from a
+# host-local drop-in; without it the "machine stats from this server" resource
+# goes down and says so.
+machine_health:
+  drive_usage_threshold_percent: 90
+  # Only while discharging: a flat battery on mains is charging back up.
+  battery_low_charge_threshold_percent: 15
+  stale_after: 10m
+  request_timeout: 15s
+  # A machine not listed here that stops reporting shows as unknown and alerts
+  # nothing: a laptop that is shut is not a fault. Entries are the bridges' ids:
+  # machine_id from GET /machines/stats, and for a connected server's machine
+  # also peer_server_id, its other_server_id in GET /peer-connections.
+  always_on_machines:
+    - machine_id: m_localhost         # the host this bridge runs on
+    - machine_id: m_daa85af698b5575b  # a home server, on runner
+
 services:
   - name: nats
     type: systemd

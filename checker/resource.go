@@ -59,6 +59,17 @@ type ResourceState struct {
 	// — each one a Claude Code process, each one making the shortage worse.
 	// Recovery has to be sustained before it earns the counters back.
 	UnderThresholdSince time.Time `json:"under_threshold_since,omitempty"`
+
+	// The fields below are set only on the machine resources
+	// (machine_health.go), and say which machine, server, drive or battery a
+	// row is about. The ids are the bridges'; the names are for display.
+	MachineID        string `json:"machine_id,omitempty"`
+	MachineName      string `json:"machine_name,omitempty"`
+	PeerConnectionID string `json:"peer_connection_id,omitempty"`
+	PeerServerID     string `json:"peer_server_id,omitempty"`
+	PeerServerName   string `json:"peer_server_name,omitempty"`
+	DriveMountPoint  string `json:"drive_mount_point,omitempty"`
+	BatteryName      string `json:"battery_name,omitempty"`
 }
 
 const (
@@ -74,11 +85,11 @@ const (
 func (c *Checker) GetResourceStates() []ResourceState {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	result := make([]ResourceState, 0, len(c.resourceStates))
+	result := make([]ResourceState, 0, len(c.resourceStates)+len(c.machineHealth.resourceStates))
 	for _, s := range c.resourceStates {
 		result = append(result, *s)
 	}
-	return result
+	return append(result, c.machineResourceStates()...)
 }
 
 func (c *Checker) checkAllResources() {
@@ -107,32 +118,99 @@ func measureResourceUsage(res ResourceConfig) (float64, string, error) {
 
 func (c *Checker) checkResource(res ResourceConfig) {
 	usagePct, detail, checkErr := c.measureResource(res)
+	var reading resourceReading
+	if checkErr != nil {
+		reading = resourceReading{outcome: resourceReadingFailed, err: checkErr}
+	} else {
+		reading = resourceReading{
+			outcome:           resourceReadingMeasured,
+			usagePercent:      usagePct,
+			detail:            detail,
+			thresholdBreached: usagePct >= res.Threshold,
+			breachDescription: fmt.Sprintf("usage %.1f%% exceeds threshold %.1f%%", usagePct, res.Threshold),
+		}
+	}
+	c.recordResourceReading(c.resourceStates, res.Name, res, reading)
+}
+
+// resourceReadingOutcome is what one look at a resource found.
+type resourceReadingOutcome int
+
+const (
+	// resourceReadingMeasured: a number was read, and thresholdBreached says
+	// whether it crossed the line.
+	resourceReadingMeasured resourceReadingOutcome = iota
+	// resourceReadingFailed: the check could not measure. Status goes down.
+	resourceReadingFailed
+	// resourceReadingUnavailable: there is nothing current to judge, and that
+	// is not a fault: a laptop that is asleep sends no samples. Status goes
+	// unknown and nothing alerts.
+	resourceReadingUnavailable
+)
+
+// resourceReading is one look at a resource, handed to recordResourceReading.
+type resourceReading struct {
+	outcome resourceReadingOutcome
+	// usagePercent and detail are set for measured readings, and for
+	// unavailable ones when there is an older reading to show.
+	usagePercent float64
+	detail       string
+	// thresholdBreached and breachDescription are set for measured readings.
+	thresholdBreached bool
+	breachDescription string
+	// err is set for failed readings.
+	err error
+	// failureWaitsForAlertThreshold makes a failed reading go degraded first
+	// and down only after AlertThreshold failures in a row, as a breach does.
+	// disk-root and memory go down on the first failure; the machine stats
+	// sources wait, because a bridge deploy fails one fetch every time.
+	failureWaitsForAlertThreshold bool
+}
+
+// recordResourceReading applies one reading to the state at states[key] and
+// fires the alert callbacks. It is the one alert path for every resource:
+// consecutive failures, the 15-minute repeat alert, under_threshold_since and
+// the cc-agent limits all live here.
+func (c *Checker) recordResourceReading(states map[string]*ResourceState, key string, res ResourceConfig, reading resourceReading) {
 	now := c.now()
 
 	c.mu.Lock()
-	state := c.resourceStates[res.Name]
+	state := states[key]
 	oldStatus := state.Status
 	state.LastCheck = now
 
-	if checkErr != nil {
+	switch reading.outcome {
+	case resourceReadingFailed:
 		// We failed to MEASURE. That is a broken check, not a breached
 		// threshold — UsagePct still holds the last good reading and says
 		// nothing about right now, so we must not let it look like a breach.
 		state.ConsecutiveFails++
-		state.LastError = checkErr.Error()
-		state.Status = StatusDown
+		state.LastError = reading.err.Error()
+		if reading.failureWaitsForAlertThreshold && state.ConsecutiveFails < c.config.AlertThreshold {
+			state.Status = StatusDegraded
+		} else {
+			state.Status = StatusDown
+		}
 		state.ThresholdBreached = false
 		// Nothing was measured, so nothing was measured healthy: a recovery
 		// window cannot be built out of readings we do not have.
 		state.UnderThresholdSince = time.Time{}
-	} else {
-		state.UsagePct = usagePct
-		state.Detail = detail
-		if usagePct >= res.Threshold {
+	case resourceReadingUnavailable:
+		state.UsagePct = reading.usagePercent
+		state.Detail = reading.detail
+		state.ConsecutiveFails = 0
+		state.ThresholdBreached = false
+		state.Status = StatusUnknown
+		state.LastError = ""
+		state.UnderThresholdSince = time.Time{}
+	default:
+		state.UsagePct = reading.usagePercent
+		state.Detail = reading.detail
+		if reading.thresholdBreached {
 			state.ConsecutiveFails++
 			state.ThresholdBreached = true
 			state.UnderThresholdSince = time.Time{}
-			state.LastError = fmt.Sprintf("usage %.1f%% exceeds threshold %.1f%%", usagePct, res.Threshold)
+			state.LastError = reading.breachDescription
 			if state.ConsecutiveFails >= c.config.AlertThreshold {
 				state.Status = StatusDown
 			} else {
@@ -196,15 +274,15 @@ func (c *Checker) checkResource(res ResourceConfig) {
 	c.mu.Unlock()
 
 	if oldStatus != newStatus && newStatus != StatusUnknown && c.onChange != nil {
-		c.onChange(res.Name, oldStatus, newStatus)
+		c.onChange(stateCopy.Name, oldStatus, newStatus)
 	}
 
 	if firePersistent && c.onPersistentAlert != nil {
-		c.onPersistentAlert(res.Name, stateCopy)
+		c.onPersistentAlert(stateCopy.Name, stateCopy)
 	}
 
 	if fireGaveUp && c.onCCAgentExhausted != nil {
-		c.onCCAgentExhausted(res.Name, stateCopy)
+		c.onCCAgentExhausted(stateCopy.Name, stateCopy)
 	}
 
 	if spawnAgent {

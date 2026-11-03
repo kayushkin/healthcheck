@@ -100,6 +100,11 @@ func (a *Alerter) OnStatusChange(name string, oldStatus, newStatus checker.Statu
 func (a *Alerter) OnPersistentAlert(name string, state checker.ResourceState) {
 	msg := fmt.Sprintf("[%s] STILL DOWN: %s at %.1f%% (threshold %.1f%%) %s",
 		time.Now().Format(time.RFC3339), name, state.UsagePct, state.Threshold, state.Detail)
+	// The percentage alone does not say what is wrong with a battery or a
+	// silent machine; the check's own sentence does.
+	if state.LastError != "" {
+		msg += ": " + state.LastError
+	}
 
 	a.mu.Lock()
 	if a.logger != nil {

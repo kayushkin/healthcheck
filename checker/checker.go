@@ -166,6 +166,8 @@ type Checker struct {
 	// enableUnit / isEnabled above.
 	measureResource func(res ResourceConfig) (usagePct float64, detail string, err error)
 	now             func() time.Time
+
+	machineHealth *machineHealthState
 }
 
 func New(cfg *Config) *Checker {
@@ -176,6 +178,7 @@ func New(cfg *Config) *Checker {
 		history:         make(map[string][]uptimeRecord),
 		measureResource: measureResourceUsage,
 		now:             time.Now,
+		machineHealth:   newMachineHealthState(cfg.MachineHealth),
 	}
 	for _, svc := range cfg.Services {
 		c.states[svc.Name] = &ServiceState{
@@ -228,6 +231,7 @@ func (c *Checker) Run(ctx context.Context) {
 	// Initial check
 	c.checkAll()
 	c.checkAllResources()
+	c.checkMachineHealth()
 
 	ticker := time.NewTicker(c.config.CheckInterval)
 	defer ticker.Stop()
@@ -238,6 +242,7 @@ func (c *Checker) Run(ctx context.Context) {
 		case <-ticker.C:
 			c.checkAll()
 			c.checkAllResources()
+			c.checkMachineHealth()
 		}
 	}
 }
