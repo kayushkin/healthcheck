@@ -76,6 +76,11 @@ services:
     unit: agent-party
     auto_restart: true
 
+  - name: gameshow
+    type: systemd
+    unit: gameshow
+    auto_restart: true
+
   - name: inber-server
     type: systemd
     unit: inber-server
