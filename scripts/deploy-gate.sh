@@ -8,6 +8,13 @@
 #   deploy-gate record    run last, after the service is up. Appends the deploy
 #                         to repo-store's ledger.
 #   deploy-gate status    print what check would say, exit 0 either way.
+#   deploy-gate register  register this tree, and every sibling tree its Go build
+#                         reads, with repo-store, as the main clone of its repo.
+#                         Refuses a tree whose name repo-store already has at
+#                         another path: that one is a second clone.
+#   deploy-gate install   run from a healthcheck main clone: install this script
+#                         as ~/bin/deploy-gate. Checks only what needs no
+#                         repo-store, so a fresh host can install the gate first.
 #   deploy-gate detach <log> [--setenv NAME]... -- <command> [args]
 #                         for a deploy that restarts the service its caller runs
 #                         in. Runs <command> in a transient systemd unit, logging
@@ -50,6 +57,22 @@
 #                       ships somebody's half-done work under this repo's sha.
 #                       (2026-09-17: a bridge built against a stale agent-store
 #                       worktree came up with no agent data at all.)
+#
+# A FRESH HOST
+#
+# The path checks ask repo-store, and repo-store is deployed through this gate,
+# so a host with neither needs an order that never skips a check:
+#
+#   1. healthcheck clone:  scripts/deploy-gate.sh install
+#   2. repo-store clone:   ./deploy.sh — repo-store is the one repo the gate
+#      lets through while repo-store does not answer, because the repo-store
+#      checks cannot be asked of a store that is not running yet. Every other
+#      check still runs. Its record step registers it and its siblings.
+#   3. any other repo:     deploy-gate register, once, for siblings repo-store
+#      has never seen; then ./deploy.sh.
+#
+# For any other repo, a repo-store that does not answer is a refusal of its
+# own, never read as "this path is not registered".
 #
 # THE OVERRIDE
 #
@@ -134,6 +157,103 @@ repo_store() { # repo_store <method> <path> [json] → body on stdout, fails on 
 }
 
 json_field() { python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get(sys.argv[1]); print("" if v is None else v)' "$1"; }
+
+urlencode() { python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+
+# repo_store_answers — true when repo-store takes a request at all. A 404 from
+# /by-path means "not registered"; no answer means nothing is known, and the
+# two must never be read as one.
+repo_store_answers() { curl -sfS -o /dev/null --max-time 5 "$REPO_STORE_URL/health" 2>/dev/null; }
+
+# go_module_of <tree> — the module path its go.mod declares, or empty.
+go_module_of() { [ -f "$1/go.mod" ] && sed -n 's/^module[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$1/go.mod" | head -1; }
+
+repo_store_module="github.com/kayushkin/repo-store"
+healthcheck_module="github.com/kayushkin/healthcheck"
+
+# origin_name_of <tree> — the repo name in its origin URL, or the folder name.
+origin_name_of() {
+  local url
+  url="$(git -C "$1" remote get-url origin 2>/dev/null || true)"
+  if [ -n "$url" ]; then basename "${url%.git}"; else basename "$1"; fi
+}
+
+# registration_fault <tree> <label> — empty when repo-store has <tree> at its
+# path. Otherwise one line: a second clone, or a main clone nobody registered.
+registration_fault() {
+  local tree="$1" label="$2" name other
+  repo_store GET "/by-path?path=$(urlencode "$tree")" >/dev/null 2>&1 && return 0
+  name="$(origin_name_of "$tree")"
+  other="$(repo_store GET "/repos/by-name/$name" 2>/dev/null || true)"
+  if [ -n "$other" ]; then
+    echo "$label is a second clone: repo-store has $name at $(printf '%s' "$other" | json_field path)"
+  else
+    echo "$label is not registered with repo-store: if it is the main clone of $name, run deploy-gate register in $top"
+  fi
+}
+
+# register_tree <tree> — register <tree> as the main clone of its repo, unless
+# repo-store already has it. Prints what it did; fails on a second clone or a
+# tree that is not a clean main clone.
+register_tree() {
+  local tree="$1" name other faults body
+  if repo_store GET "/by-path?path=$(urlencode "$tree")" >/dev/null 2>&1; then
+    echo "deploy-gate: $tree is already registered"; return 0
+  fi
+  name="$(origin_name_of "$tree")"
+  other="$(repo_store GET "/repos/by-name/$name" 2>/dev/null || true)"
+  if [ -n "$other" ]; then
+    echo "deploy-gate: not registering $tree: repo-store has $name at $(printf '%s' "$other" | json_field path)" >&2; return 1
+  fi
+  faults="$(tree_faults "$tree" "$tree")"
+  if [ -n "$faults" ]; then
+    echo "deploy-gate: not registering $tree, which is not a clean main clone:" >&2
+    printf '  - %s\n' "$faults" >&2; return 1
+  fi
+  body="$(python3 -c 'import json,sys; print(json.dumps({"name":sys.argv[1],"path":sys.argv[2]}))' "$name" "$tree")"
+  repo_store POST /repos "$body" >/dev/null || { echo "deploy-gate: repo-store at $REPO_STORE_URL would not register $tree" >&2; return 1; }
+  echo "deploy-gate: registered $tree as $name"
+}
+
+# Sibling trees a Go build reads: every local-directory replace in go.mod, and
+# every use/replace in the go.work that GOWORK (or a go.work up the tree) names.
+# Read with `go mod edit` / `go work edit`, which parse the files and resolve
+# nothing — `go list -m all` fails outright in a repo whose replaced modules
+# are not fetchable, and a check that fails quietly passes everything.
+go_local_dirs() { # go_local_dirs <kind: mod|work> <file> → absolute dirs, one per line
+  local kind="$1" file="$2" base
+  base="$(cd "$(dirname "$file")" && pwd)"
+  go "$kind" edit -json "$file" | python3 -c '
+import json,os,sys
+base=sys.argv[1]; d=json.load(sys.stdin); out=set()
+for r in d.get("Replace") or []:
+    new=r.get("New") or {}
+    if new.get("Path") and not new.get("Version"): out.add(new["Path"])   # a directory, not a module version
+for u in d.get("Use") or []:
+    if u.get("DiskPath"): out.add(u["DiskPath"])
+for p in sorted(out): print(os.path.normpath(p if os.path.isabs(p) else os.path.join(base,p)))' "$base"
+}
+# sibling_trees — the top of every git tree, other than this one, that the Go
+# build reads. Dies when a file cannot be read: a check that fails quietly
+# passes everything. A missing directory is printed as "missing:<dir>".
+sibling_trees() {
+  [ -f "$top/go.mod" ] || return 0
+  command -v go >/dev/null || die "this is a Go repo and go is not on PATH, so the trees it builds against cannot be checked"
+  local dirs workfile sibling sibling_top
+  dirs="$(go_local_dirs mod "$top/go.mod")" || die "could not read $top/go.mod"
+  workfile="$(cd "$top" && go env GOWORK)"
+  if [ -n "$workfile" ] && [ "$workfile" != "off" ]; then
+    dirs+=$'\n'"$(go_local_dirs work "$workfile")" || die "could not read $workfile"
+  fi
+  while IFS= read -r sibling; do
+    [ -z "$sibling" ] && continue
+    if [ ! -d "$sibling" ]; then echo "missing:$sibling"; continue; fi
+    sibling_top="$(git -C "$sibling" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -z "$sibling_top" ] && continue          # a plain directory inside this repo, or not a repo
+    [ "$sibling_top" = "$top" ] && continue
+    echo "$sibling_top"
+  done < <(printf '%s\n' "$dirs" | sort -u) | sort -u
+}
 
 # --- detached deploys, and the report back ------------------------------------
 
@@ -246,6 +366,65 @@ case "$mode" in
     ;;
 esac
 
+# --- modes that run before the full check ------------------------------------
+
+case "$mode" in
+  install)
+    [ "$(go_module_of "$top")" = "$healthcheck_module" ] || die "install runs from a healthcheck clone; $top is not one"
+    install_refusals="$(tree_faults "$top" "this tree")"
+    install_default="$(default_branch_of "$top")"
+    if git -C "$top" remote get-url origin >/dev/null 2>&1 && [ -n "$install_default" ]; then
+      git -C "$top" fetch --quiet origin "$install_default" || die "could not fetch origin/$install_default"
+      git -C "$top" merge-base --is-ancestor HEAD "origin/$install_default" \
+        || install_refusals+=$'\n'"HEAD is not on origin/$install_default: merge it and push first"
+      [ "$(git -C "$top" rev-list --count "HEAD..origin/$install_default")" -eq 0 ] \
+        || install_refusals+=$'\n'"this tree is behind origin/$install_default: pull first"
+    else
+      install_refusals+=$'\n'"this tree has no origin to check against"
+    fi
+    install_refusals="$(printf '%s\n' "$install_refusals" | sed '/^$/d')"
+    if [ -n "$install_refusals" ]; then
+      echo "deploy-gate: not installing from $top:" >&2
+      printf '%s\n' "$install_refusals" | sed 's/^/  - /' >&2
+      exit 1
+    fi
+    target="${DEPLOY_GATE_INSTALL_PATH:-$HOME/bin/deploy-gate}"
+    mkdir -p "$(dirname "$target")"
+    install -m 755 "$top/scripts/deploy-gate.sh" "$target"
+    echo "deploy-gate: installed $target from healthcheck @ $(git -C "$top" rev-parse --short=9 HEAD)"
+    exit 0
+    ;;
+
+  register)
+    repo_store_answers || die "repo-store at $REPO_STORE_URL does not answer: deploy repo-store first"
+    register_failed=0
+    register_tree "$top" || register_failed=1
+    while IFS= read -r sibling; do
+      [ -z "$sibling" ] && continue
+      case "$sibling" in missing:*) echo "deploy-gate: the build reads ${sibling#missing:}, which does not exist" >&2; register_failed=1; continue ;; esac
+      register_tree "$sibling" || register_failed=1
+    done < <(sibling_trees)
+    exit "$register_failed"
+    ;;
+
+  record)
+    # A repo that is deployed while repo-store was down (repo-store itself, on a
+    # fresh host) registers the trees it was built from, now that it answers.
+    # repo-store's deploy.sh records seconds after the start, so give it time to listen.
+    if [ "$(go_module_of "$top")" = "$repo_store_module" ]; then
+      for _ in $(seq 1 20); do repo_store_answers && break; sleep 1; done
+    fi
+    if [ "$(go_module_of "$top")" = "$repo_store_module" ] && repo_store_answers \
+       && ! repo_store GET "/by-path?path=$(urlencode "$top")" >/dev/null 2>&1; then
+      register_tree "$top" || die "repo-store came up but would not register $top; the deploy happened and is NOT recorded"
+      while IFS= read -r sibling; do
+        case "$sibling" in ""|missing:*) continue ;; esac
+        register_tree "$sibling" || die "repo-store came up but would not register $sibling; the deploy happened and is NOT recorded"
+      done < <(sibling_trees)
+    fi
+    ;;
+esac
+
 # --- facts about this tree ---------------------------------------------------
 
 default="$(default_branch_of "$top")"
@@ -257,16 +436,32 @@ dirty=false
 refusals=()
 while IFS= read -r line; do [ -n "$line" ] && refusals+=("$line"); done < <(tree_faults "$top" "this tree")
 
+# Is repo-store there to ask? When it is not, nothing about paths is known.
+# The one tree let through is repo-store itself, which has to run before it can
+# answer; every other check still applies to it.
+repo_store_up=true
+bootstrapping_repo_store=false
+if ! repo_store_answers; then
+  repo_store_up=false
+  if [ "$(go_module_of "$top")" = "$repo_store_module" ]; then
+    bootstrapping_repo_store=true
+  else
+    refusals+=("repo-store at $REPO_STORE_URL does not answer, so whether this tree and its siblings are main clones cannot be checked: deploy repo-store first")
+  fi
+fi
+
 # Which repo is this, by repo-store's id? First by the tree's own path. A clone
 # somewhere else is matched by the name in its origin URL, and then refused for
 # being in the wrong place.
-repo_json="$(repo_store GET "/by-path?path=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$top")" 2>/dev/null || true)"
-if [ -z "$repo_json" ]; then
-  origin_url="$(git -C "$top" remote get-url origin 2>/dev/null || true)"
-  origin_name="$(basename "${origin_url%.git}")"
-  [ -n "$origin_name" ] && repo_json="$(repo_store GET "/repos/by-name/$origin_name" 2>/dev/null || true)"
-  if [ -n "$repo_json" ]; then
-    refusals+=("this tree ($top) is not where repo-store has $origin_name ($(printf '%s' "$repo_json" | json_field path)): deploy from the main clone")
+repo_json=""
+if $repo_store_up; then
+  repo_json="$(repo_store GET "/by-path?path=$(urlencode "$top")" 2>/dev/null || true)"
+  if [ -z "$repo_json" ]; then
+    origin_name="$(origin_name_of "$top")"
+    repo_json="$(repo_store GET "/repos/by-name/$origin_name" 2>/dev/null || true)"
+    if [ -n "$repo_json" ]; then
+      refusals+=("this tree ($top) is not where repo-store has $origin_name ($(printf '%s' "$repo_json" | json_field path)): deploy from the main clone")
+    fi
   fi
 fi
 repo_id=""; [ -n "$repo_json" ] && repo_id="$(printf '%s' "$repo_json" | json_field id)"
@@ -288,43 +483,16 @@ elif [ -n "$default" ]; then
   git -C "$top" merge-base --is-ancestor "$head_sha" "$default" && on_default=true
 fi
 
-# Sibling trees a Go build reads: every local-directory replace in go.mod, and
-# every use/replace in the go.work that GOWORK (or a go.work up the tree) names.
-# Read with `go mod edit` / `go work edit`, which parse the files and resolve
-# nothing — `go list -m all` fails outright in a repo whose replaced modules
-# are not fetchable, and a check that fails quietly passes everything.
-go_local_dirs() { # go_local_dirs <kind: mod|work> <file> → absolute dirs, one per line
-  local kind="$1" file="$2" base
-  base="$(cd "$(dirname "$file")" && pwd)"
-  go "$kind" edit -json "$file" | python3 -c '
-import json,os,sys
-base=sys.argv[1]; d=json.load(sys.stdin); out=set()
-for r in d.get("Replace") or []:
-    new=r.get("New") or {}
-    if new.get("Path") and not new.get("Version"): out.add(new["Path"])   # a directory, not a module version
-for u in d.get("Use") or []:
-    if u.get("DiskPath"): out.add(u["DiskPath"])
-for p in sorted(out): print(os.path.normpath(p if os.path.isabs(p) else os.path.join(base,p)))' "$base"
-}
-if [ -f "$top/go.mod" ]; then
-  command -v go >/dev/null || die "this is a Go repo and go is not on PATH, so the trees it builds against cannot be checked"
-  sibling_dirs="$(go_local_dirs mod "$top/go.mod")" || die "could not read $top/go.mod"
-  workfile="$(cd "$top" && go env GOWORK)"
-  if [ -n "$workfile" ] && [ "$workfile" != "off" ]; then
-    sibling_dirs+=$'\n'"$(go_local_dirs work "$workfile")" || die "could not read $workfile"
+# Sibling trees a Go build reads must each be a clean main clone, registered.
+while IFS= read -r sibling; do
+  [ -z "$sibling" ] && continue
+  case "$sibling" in missing:*) refusals+=("the build reads ${sibling#missing:}, which does not exist"); continue ;; esac
+  while IFS= read -r line; do [ -n "$line" ] && refusals+=("$line"); done < <(tree_faults "$sibling" "the build reads $sibling, which")
+  if $repo_store_up; then
+    line="$(registration_fault "$sibling" "the build reads $sibling, which")"
+    [ -n "$line" ] && refusals+=("$line")
   fi
-  while IFS= read -r sibling; do
-    [ -z "$sibling" ] && continue
-    if [ ! -d "$sibling" ]; then refusals+=("the build reads $sibling, which does not exist"); continue; fi
-    sibling_top="$(git -C "$sibling" rev-parse --show-toplevel 2>/dev/null || true)"
-    if [ -z "$sibling_top" ]; then continue; fi          # a plain directory inside this repo, or not a repo
-    [ "$sibling_top" = "$top" ] && continue
-    while IFS= read -r line; do [ -n "$line" ] && refusals+=("$line"); done < <(tree_faults "$sibling_top" "the build reads $sibling_top, which")
-    if ! repo_store GET "/by-path?path=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$sibling_top")" >/dev/null 2>&1; then
-      refusals+=("the build reads $sibling_top, which is not a path repo-store has for any repo: it is a second clone, not a main clone")
-    fi
-  done < <(printf '%s\n' "$sibling_dirs" | sort -u)
-fi
+done < <(sibling_trees)
 
 # --- what is live now, from the ledger ---------------------------------------
 
@@ -344,6 +512,9 @@ fi
 report() {
   echo "deploy-gate: $(basename "$top") @ ${head_sha:0:9} on ${branch:-a detached HEAD} (default: ${default:-unknown})"
   echo "deploy-gate: $last_line"
+  if $bootstrapping_repo_store; then
+    echo "deploy-gate: repo-store at $REPO_STORE_URL does not answer and this is repo-store: its own path checks wait for it to start; record registers this tree and its siblings"
+  fi
   if [ "${#refusals[@]}" -eq 0 ]; then
     echo "deploy-gate: fit to deploy"
   else
@@ -394,6 +565,6 @@ PY
     ;;
 
   *)
-    die "usage: deploy-gate check | record | status | detach <log> [--setenv NAME]... -- <command> [args]"
+    die "usage: deploy-gate check | record | status | register | install | detach <log> [--setenv NAME]... -- <command> [args]"
     ;;
 esac
