@@ -251,6 +251,11 @@ services:
     unit: activity-store
     auto_restart: true
 
+  - name: calendar-store
+    type: systemd
+    unit: calendar-store
+    auto_restart: true
+
   - name: possession-store
     type: systemd
     unit: possession-store
