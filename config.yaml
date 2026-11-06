@@ -458,6 +458,15 @@ services:
     command: ["/home/kayushkincom/repos/healthcheck/scripts/repo-elf-status.sh"]
     expect_output: "ok"
 
+  # The nightly full backup of this server, pulled by the backup machine
+  # (repo server-backup). After each run the puller sends its status here;
+  # this fails when the last run failed or none succeeded in 30 hours, so a
+  # backup machine that stops running shows up too.
+  - name: server-backup
+    type: command
+    command: ["/usr/local/bin/server-backup-status"]
+    expect_output: "ok"
+
   # Tier 1, a fifth axis, and the mirror of the one above: --elf asks whether a
   # file that was never source got committed, --nul asks whether a file that IS
   # source is still readable as text.
