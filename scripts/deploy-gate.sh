@@ -18,7 +18,9 @@
 #   deploy-gate detach <log> [--setenv NAME]... -- <command> [args]
 #                         for a deploy that restarts the service its caller runs
 #                         in. Runs <command> in a transient systemd unit, logging
-#                         to <log>, and returns at once. When the command ends,
+#                         to a file of its own beside <log> (<log> minus .log,
+#                         then .<unit>.log), points <log> at it with a symlink,
+#                         and returns at once. When the command ends,
 #                         pass or fail, the unit sends the outcome and the end of
 #                         the log to the bridge session that started it.
 #   deploy-gate run-detached <command> [args]
@@ -346,9 +348,19 @@ case "$mode" in
     case "$log" in /*) ;; *) die "detach: the log path must be absolute: $log" ;; esac
     # The log lives under $HOME, not /tmp: a transient unit gets a private /tmp.
     mkdir -p "$(dirname "$log")"
-    : >"$log"
-    unit="$(basename "$top")-deploy-$$.service"
-    unit_environment=(--setenv=DEPLOY_DETACHED=1 --setenv=DEPLOY_GATE_LOG="$log")
+    unit_stem="$(basename "$top")-deploy-$$"
+    unit="$unit_stem.service"
+    # Each run writes its own file, and <log> is a symlink to the newest one.
+    # Emptying one shared file let a second deploy wipe the log of a first that
+    # was still building (two llm-bridge deploys on 2026-11-04 08:13 and 08:14
+    # UTC), and the two runs' lines and reports then mixed in one file.
+    run_log="${log%.log}.$unit_stem.log"
+    : >"$run_log"
+    ln -sfn "$run_log" "$log"
+    # Drop run logs no deploy has written to for a week. A run still going
+    # writes to its file, so its mtime keeps it.
+    find "$(dirname "$log")" -maxdepth 1 -type f -name "$(basename "${log%.log}").*-deploy-*.log" -mtime +7 -delete
+    unit_environment=(--setenv=DEPLOY_DETACHED=1 --setenv=DEPLOY_GATE_LOG="$run_log")
     for name in "${carried[@]}"; do
       if [ -n "${!name+x}" ]; then unit_environment+=(--setenv="$name=${!name}"); fi
     done
@@ -357,14 +369,14 @@ case "$mode" in
     # setsid and nohup do not escape a cgroup kill.
     sudo systemd-run --collect --unit="$unit" --description="$(basename "$top") deploy ($USER)" \
       --uid="$(id -u)" --gid="$(id -g)" --working-directory="$top" "${unit_environment[@]}" \
-      --property=StandardOutput=append:"$log" --property=StandardError=append:"$log" \
+      --property=StandardOutput=append:"$run_log" --property=StandardError=append:"$run_log" \
       "$(readlink -f "$0")" run-detached "$@" >/dev/null
-    echo "deploy-gate: detached deploy (unit=$unit), tail -f $log"
+    echo "deploy-gate: detached deploy (unit=$unit), tail -f $run_log ($log points at the newest run)"
     if [ -n "${LLM_BRIDGE_SESSION_ID:-}" ]; then
       echo "deploy-gate: when it finishes, pass or fail, the outcome is sent to session $LLM_BRIDGE_SESSION_ID as a new message."
       echo "deploy-gate: do not wait for it in this turn: if it restarts llm-bridge, it kills this process. End the turn; the report starts the next one."
     else
-      echo "deploy-gate: no LLM_BRIDGE_SESSION_ID here, so nothing will report back: read $log for the outcome."
+      echo "deploy-gate: no LLM_BRIDGE_SESSION_ID here, so nothing will report back: read $run_log for the outcome."
     fi
     exit 0
     ;;

@@ -17,7 +17,9 @@
 #   - an unregistered sibling is refused until register runs, then passes;
 #   - a second clone of a registered repo is refused by check and by register;
 #   - a detached deploy's report waits for a bridge that is still starting, and
-#     gives up with a reason when the bridge stays down.
+#     gives up with a reason when the bridge stays down;
+#   - two detached deploys with one log path each write their own file, and the
+#     second does not empty the first's.
 #
 # Usage: scripts/deploy-gate-selftest.sh     (exit 0 = all pinned)
 
@@ -206,6 +208,34 @@ if run_detached_with_report 3 >"$work/out" 2>&1; then fail "a deploy whose repor
 elif grep -q "/health did not answer within 3s, so the bridge is down; session br_test is NOT told" "$work/out"; then
   pass "with the bridge down, the report gives up after the wait and says why"
 else fail "bridge-down report: $(cat "$work/out")"; fi
+
+# --- two detached deploys that share one log path -----------------------------
+# A stand-in sudo records where systemd-run would send the unit's output and
+# starts nothing. The first run then "writes" to its file; the second detach
+# must not empty it.
+mkdir -p "$work/fake-bin"
+cat >"$work/fake-bin/sudo" <<'SH'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  case "$argument" in --property=StandardOutput=append:*) echo "${argument#--property=StandardOutput=append:}" >>"$DETACH_TARGETS" ;; esac
+done
+SH
+chmod +x "$work/fake-bin/sudo"
+detach_once() {
+  (cd "$work/repos/some-store" && PATH="$work/fake-bin:$PATH" DETACH_TARGETS="$work/detach-targets" \
+    "$gate" detach "$work/home/.cache/shared-deploy.log" -- true)
+}
+: >"$work/detach-targets"
+detach_once >"$work/out" 2>&1 || fail "first detach: $(cat "$work/out")"
+first_log="$(sed -n 1p "$work/detach-targets")"
+echo "first run still building" >>"$first_log"
+detach_once >"$work/out" 2>&1 || fail "second detach: $(cat "$work/out")"
+second_log="$(sed -n 2p "$work/detach-targets")"
+if [ -n "$first_log" ] && [ -n "$second_log" ] && [ "$first_log" != "$second_log" ] \
+   && grep -q "first run still building" "$first_log" \
+   && [ "$(readlink "$work/home/.cache/shared-deploy.log")" = "$second_log" ]; then
+  pass "a second detached deploy writes its own log, leaves the first one's alone, and the shared path points at the newest"
+else fail "shared detach log: first=$first_log second=$second_log link=$(readlink "$work/home/.cache/shared-deploy.log" || true)"; fi
 
 echo
 if [ "$failures" -eq 0 ]; then echo "all pinned"; else echo "$failures failure(s)"; exit 1; fi
