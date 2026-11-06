@@ -194,6 +194,11 @@ services:
     unit: people-store
     auto_restart: true
 
+  - name: budget-store
+    type: systemd
+    unit: budget-store
+    auto_restart: true
+
   - name: short-name-store
     type: systemd
     unit: short-name-store
