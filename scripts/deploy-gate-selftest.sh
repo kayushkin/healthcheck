@@ -15,7 +15,9 @@
 #     still run), and record registers it and its siblings once it is up;
 #   - with repo-store down, any other repo is refused, naming repo-store;
 #   - an unregistered sibling is refused until register runs, then passes;
-#   - a second clone of a registered repo is refused by check and by register.
+#   - a second clone of a registered repo is refused by check and by register;
+#   - a detached deploy's report waits for a bridge that is still starting, and
+#     gives up with a reason when the bridge stays down.
 #
 # Usage: scripts/deploy-gate-selftest.sh     (exit 0 = all pinned)
 
@@ -158,6 +160,52 @@ else fail "second clone register: $(cat "$work/out")"; fi
 if (cd "$work/repos/user-of-copy" && "$gate" check) >"$work/out" 2>&1; then fail "check passed a build that reads a second clone"
 elif grep -q "is a second clone: repo-store has dependency at" "$work/out"; then pass "check refuses a build that reads a second clone"
 else fail "second clone check: $(cat "$work/out")"; fi
+
+# --- the report to the session that started a detached deploy -----------------
+# A stand-in bridge answers /health and records each /sessions/<id>/send body.
+bridge_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+echo "LLMBRIDGE_SERVICE_TOKEN=test-token" >"$work/bridge-tokens.env"
+start_bridge() {
+  python3 - "$bridge_port" "$work/bridge-received" >"$work/bridge.log" 2>&1 <<'PY' &
+import sys
+from http.server import BaseHTTPRequestHandler,HTTPServer
+port,received=int(sys.argv[1]),sys.argv[2]
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path=="/health" else 404); self.end_headers()
+    def do_POST(self):
+        body=self.rfile.read(int(self.headers.get("Content-Length",0)))
+        if self.headers.get("X-LLM-Bridge-Service-Token")!="test-token" or not self.path.endswith("/send"):
+            self.send_response(401); self.end_headers(); return
+        with open(received,"ab") as f: f.write(self.path.encode()+b"\n"+body+b"\n")
+        self.send_response(200); self.end_headers()
+    def log_message(self,*args): pass
+HTTPServer(("127.0.0.1",port),Handler).serve_forever()
+PY
+  bridge_pid=$!
+}
+run_detached_with_report() {
+  (cd "$work/repos/some-store" && DEPLOY_DETACHED=1 LLM_BRIDGE_SESSION_ID=br_test \
+    LLM_BRIDGE_URL="http://127.0.0.1:$bridge_port" LLM_BRIDGE_TOKEN_FILE="$work/bridge-tokens.env" \
+    DEPLOY_GATE_BRIDGE_HEALTH_WAIT_SECONDS="$1" "$gate" run-detached true)
+}
+
+# The bridge comes up 4 seconds after the deploy ends: the report waits for it.
+(sleep 4; start_bridge; wait) &
+late_bridge_starter=$!
+if run_detached_with_report 30 >"$work/out" 2>&1 \
+   && grep -q "answered /health after" "$work/out" && grep -q "told session br_test" "$work/out" \
+   && grep -q "/sessions/br_test/send" "$work/bridge-received"; then
+  pass "the report waits for a bridge that is still starting, then reaches the session"
+else fail "late bridge report: $(cat "$work/out")"; fi
+pkill -P "$late_bridge_starter" 2>/dev/null || true; kill "$late_bridge_starter" 2>/dev/null || true
+wait "$late_bridge_starter" 2>/dev/null || true
+
+# No bridge ever answers: the run fails and says the bridge is down.
+if run_detached_with_report 3 >"$work/out" 2>&1; then fail "a deploy whose report reached no bridge exited 0"
+elif grep -q "/health did not answer within 3s, so the bridge is down; session br_test is NOT told" "$work/out"; then
+  pass "with the bridge down, the report gives up after the wait and says why"
+else fail "bridge-down report: $(cat "$work/out")"; fi
 
 echo
 if [ "$failures" -eq 0 ]; then echo "all pinned"; else echo "$failures failure(s)"; exit 1; fi

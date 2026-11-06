@@ -259,6 +259,8 @@ sibling_trees() {
 
 BRIDGE_URL="${LLM_BRIDGE_URL:-http://localhost:8160}"
 BRIDGE_TOKEN_FILE="${LLM_BRIDGE_TOKEN_FILE:-$HOME/.config/principal-gating-tokens.env}"
+# How long the report waits for the bridge to answer /health before it gives up.
+BRIDGE_HEALTH_WAIT_SECONDS="${DEPLOY_GATE_BRIDGE_HEALTH_WAIT_SECONDS:-180}"
 
 # What the detached run needs from its caller's environment, whatever the repo.
 # record names the deployer from CLAUDE_CODE_SESSION_ID and AI_AGENT, and must
@@ -299,7 +301,20 @@ text='<bridge-report kind="deploy">\n' + text + '\n</bridge-report>'
 print(json.dumps({"message":text}))
 PY
 )"
-  # The bridge may still be coming up after the restart this deploy caused.
+  # The bridge may still be coming up after the restart this deploy caused, or
+  # after a rollback. Wait for it to answer /health before the first try, so the
+  # tries below are spent on a bridge that is up rather than on a port that
+  # refuses connections.
+  local waited=0
+  until curl -sf -o /dev/null --max-time 5 "$BRIDGE_URL/health"; do
+    if [ "$waited" -ge "$BRIDGE_HEALTH_WAIT_SECONDS" ]; then
+      echo "deploy-gate: ERROR: $BRIDGE_URL/health did not answer within ${BRIDGE_HEALTH_WAIT_SECONDS}s, so the bridge is down; session $session is NOT told how the deploy went" >&2
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  [ "$waited" -gt 0 ] && echo "deploy-gate: $BRIDGE_URL answered /health after ${waited}s"
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if curl -sfS -o /dev/null -X POST -H "X-LLM-Bridge-Service-Token: $token" -H 'Content-Type: application/json' \
       -d "$body" "$BRIDGE_URL/sessions/$session/send"; then
