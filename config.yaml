@@ -256,6 +256,11 @@ services:
     unit: calendar-store
     auto_restart: true
 
+  - name: time-ledger-store
+    type: systemd
+    unit: time-ledger-store
+    auto_restart: true
+
   - name: reference-store
     type: systemd
     unit: reference-store
