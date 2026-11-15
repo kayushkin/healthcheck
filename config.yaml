@@ -576,6 +576,11 @@ services:
     unit: sheetstack
     auto_restart: true
 
+  - name: game-store
+    type: systemd
+    unit: game-store
+    auto_restart: true
+
   - name: downloadstack
     type: systemd
     unit: downloadstack
