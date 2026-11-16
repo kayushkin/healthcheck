@@ -292,6 +292,20 @@ services:
     unit: orchestrator
     auto_restart: true
 
+  # The game's instance server (fantasy-movement-raid-slop): QUIC and
+  # WebTransport on UDP 443. The unit check restarts it; the probe check makes a
+  # real connection and passes when the server refuses its impossible join
+  # ticket, so a server that runs but no longer answers also shows down.
+  - name: fmr-instance-server
+    type: systemd
+    unit: fmr-instance-server
+    auto_restart: true
+
+  - name: fmr-instance-server-answers
+    type: command
+    command: ["/home/kayushkincom/bin/fmr-instance-probe", "https://raid.kayushkin.com/"]
+    expect_output: "HelloRefused"
+
   - name: multichat-server
     type: systemd
     unit: multichat-server
